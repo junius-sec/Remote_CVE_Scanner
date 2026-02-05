@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CVE 취약점 분석</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="/static/css/dashboard.css" rel="stylesheet">
+    <style>
+        .host-item {
+            transition: background-color 0.15s;
+        }
+
+        .host-item:hover {
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+
+        .host-item.active {
+            background-color: var(--bs-primary);
+            color: white;
+        }
+
+        .host-item.active .text-muted {
+            color: rgba(255, 255, 255, 0.7) !important;
+        }
+
+        .scan-btn {
+            min-width: 70px;
+        }
+
+        .finding-row {
+            cursor: pointer;
+        }
+
+        .finding-row:hover {
+            background-color: rgba(0, 0, 0, 0.02);
+        }
+
+        .tab-pane {
+            min-height: 70vh;
+        }
+
+        .toast-container {
+            z-index: 9999;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container-fluid">
+        <header class="py-3 mb-3 border-bottom">
+            <div class="d-flex justify-content-between align-items-center">
+                <h1 class="h4 mb-0"><i class="bi bi-shield-check me-2"></i>CVE 취약점 분석</h1>
+                <span class="badge bg-primary">v2.0</span>
+            </div>
+
+            <!-- Navigation Tabs -->
+            <ul class="nav nav-tabs mt-3" id="mainTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="local-tab" data-bs-toggle="tab" data-bs-target="#localScan"
+                        type="button" role="tab">
+                        <i class="bi bi-pc-display me-1"></i>로컬 스캔
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="remote-tab" data-bs-toggle="tab" data-bs-target="#remoteScan"
+                        type="button" role="tab">
+                        <i class="bi bi-hdd-network me-1"></i>원격 스캔
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="history-tab" data-bs-toggle="tab" data-bs-target="#scanHistory"
+                        type="button" role="tab">
+                        <i class="bi bi-clock-history me-1"></i>스캔 결과
+                    </button>
+                </li>
+            </ul>
+        </header>
+
+        <!-- Tab Content -->
+        <div class="tab-content" id="mainTabContent">
+
+            <!-- ==================== 로컬 스캔 탭 ==================== -->
+            <div class="tab-pane fade show active" id="localScan" role="tabpanel">
+                <div class="row">
+                    <div class="col-md-4">
+                        <!-- 시스템 정보 -->
+                        <div class="card mb-3">
+                            <div class="card-header py-2">
+                                <i class="bi bi-info-circle me-1"></i>현재 시스템
+                            </div>
+                            <div class="card-body py-2">
+                                <div id="localSystemInfo">
+                                    <div class="text-muted small">로딩 중...</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 스캔 설정 -->
+                        <div class="card mb-3">
+                            <div class="card-header py-2">
+                                <i class="bi bi-gear me-1"></i>스캔 설정
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label class="form-label small fw-bold">스캔 카테고리</label>
+                                    <div class="d-flex flex-wrap gap-1">
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input local-category" type="checkbox"
+                                                id="localCatAll" value="all" checked>
+                                            <label class="form-check-label small" for="localCatAll">전체</label>
+                                        </div>
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input local-category" type="checkbox"
+                                                id="localCatSystem" value="system">
+                                            <label class="form-check-label small" for="localCatSystem">시스템</label>
+                                        </div>
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input local-category" type="checkbox"
+                                                id="localCatSecurity" value="security">
+                                            <label class="form-check-label small" for="localCatSecurity">보안</label>
+                                        </div>
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input local-category" type="checkbox"
+                                                id="localCatLibraries" value="libraries">
+                                            <label class="form-check-label small" for="localCatLibraries">라이브러리</label>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label class="form-label small fw-bold">필터 옵션</label>
+                                    <div class="form-check form-check-sm">
+                                        <input class="form-check-input" type="checkbox" id="localFilterPatched" checked>
+                                        <label class="form-check-label small" for="localFilterPatched">패치된 CVE
+                                            제외</label>
+                                    </div>
+                                    <div class="form-check form-check-sm">
+                                        <input class="form-check-input" type="checkbox" id="localFilterOld" checked>
+                                        <label class="form-check-label small" for="localFilterOld">오래된 CVE 제외
+                                            (10년+)</label>
+                                    </div>
+                                </div>
+
+                                <button id="localScanBtn" class="btn btn-success w-100">
+                                    <i class="bi bi-play-fill me-1"></i>로컬 스캔 시작
+                                </button>
+
+                                <div id="localScanProgress" class="mt-3" style="display:none;">
+                                    <div class="progress mb-2" style="height: 8px;">
+                                        <div class="progress-bar progress-bar-striped progress-bar-animated"
+                                            style="width: 0%"></div>
+                                    </div>
+                                    <div class="small text-muted text-center" id="localScanStatus">준비 중...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-8">
+                        <!-- 로컬 스캔 결과 요약 -->
+                        <div class="card mb-3">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-bar-chart me-1"></i>스캔 결과 요약</span>
+                                <button class="btn btn-sm btn-outline-secondary" id="localExportCsvBtn" disabled>
+                                    <i class="bi bi-download me-1"></i>CSV
+                                </button>
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="row text-center" id="localScanSummary">
+                                    <div class="col">
+                                        <div class="h4 mb-0 text-danger" id="localHighRisk">-</div>
+                                        <small class="text-muted">고위험</small>
+                                    </div>
+                                    <div class="col">
+                                        <div class="h4 mb-0 text-warning" id="localMediumRisk">-</div>
+                                        <small class="text-muted">중위험</small>
+                                    </div>
+                                    <div class="col">
+                                        <div class="h4 mb-0 text-info" id="localLowRisk">-</div>
+                                        <small class="text-muted">저위험</small>
+                                    </div>
+                                    <div class="col">
+                                        <div class="h4 mb-0" id="localTotalCves">-</div>
+                                        <small class="text-muted">전체 CVE</small>
+                                    </div>
+                                    <div class="col">
+                                        <div class="h4 mb-0 text-success" id="localPackages">-</div>
+                                        <small class="text-muted">패키지</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 로컬 스캔 취약점 목록 -->
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <i class="bi bi-bug me-1"></i>발견된 취약점
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+                                    <table class="table table-hover table-sm mb-0">
+                                        <thead class="sticky-top bg-white">
+                                            <tr>
+                                                <th>패키지</th>
+                                                <th>CVE ID</th>
+                                                <th>CVSS</th>
+                                                <th>위험도</th>
+                                                <th>EPSS</th>
+                                                <th>KEV</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="localFindingsBody">
+                                            <tr>
+                                                <td colspan="6" class="text-center text-muted py-5">
+                                                    스캔을 실행하면 결과가 표시됩니다
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ==================== 원격 스캔 탭 ==================== -->
+            <div class="tab-pane fade" id="remoteScan" role="tabpanel">
+                <div class="row">
+                    <!-- 원격 호스트 목록 -->
+                    <div class="col-md-4">
+                        <div class="card mb-3">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-hdd-network me-1"></i>원격 호스트</span>
+                                <button class="btn btn-sm btn-primary" onclick="showAddHostModal()">
+                                    <i class="bi bi-plus"></i>
+                                </button>
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="list-group list-group-flush" id="remoteHostsList"
+                                    style="max-height: 400px; overflow-y: auto;">
+                                    <div class="text-center text-muted py-4">
+                                        <i class="bi bi-cloud-slash fs-1 d-block mb-2"></i>
+                                        등록된 호스트가 없습니다
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 스캔 프리셋 -->
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <i class="bi bi-sliders me-1"></i>스캔 프리셋
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="scanPreset" id="presetFast"
+                                        value="fast">
+                                    <label class="form-check-label small" for="presetFast">
+                                        <strong>Fast</strong> <span class="text-muted">(10-30초)</span>
+                                    </label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="scanPreset" id="presetStandard"
+                                        value="standard" checked>
+                                    <label class="form-check-label small" for="presetStandard">
+                                        <strong>Standard</strong> <span class="text-muted">(1-5분)</span>
+                                    </label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="scanPreset" id="presetDeep"
+                                        value="deep">
+                                    <label class="form-check-label small" for="presetDeep">
+                                        <strong>Deep</strong> <span class="text-muted">(5-15분)</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-8">
+                        <!-- 진행 중인 작업 -->
+                        <div class="card mb-3">
+                            <div class="card-header py-2">
+                                <i class="bi bi-list-task me-1"></i>스캔 작업 현황
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="table-responsive" style="max-height: 200px; overflow-y: auto;">
+                                    <table class="table table-sm mb-0">
+                                        <thead class="sticky-top bg-white">
+                                            <tr>
+                                                <th>호스트</th>
+                                                <th>상태</th>
+                                                <th>단계</th>
+                                                <th>진행률</th>
+                                                <th>시작</th>
+                                                <th>소요</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="remoteJobsBody">
+                                            <tr>
+                                                <td colspan="6" class="text-center text-muted py-3">
+                                                    진행 중인 작업이 없습니다
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 선택된 호스트 결과 -->
+                        <div class="card">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-bug me-1"></i>취약점 목록 <small class="text-muted"
+                                        id="selectedHostName"></small></span>
+                                <button class="btn btn-sm btn-outline-secondary" id="remoteExportCsvBtn" disabled>
+                                    <i class="bi bi-download me-1"></i>CSV
+                                </button>
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
+                                    <table class="table table-hover table-sm mb-0">
+                                        <thead class="sticky-top bg-white">
+                                            <tr>
+                                                <th>패키지</th>
+                                                <th>CVE ID</th>
+                                                <th>CVSS</th>
+                                                <th>신뢰도</th>
+                                                <th>EPSS</th>
+                                                <th>KEV</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="remoteFindingsBody">
+                                            <tr>
+                                                <td colspan="6" class="text-center text-muted py-4">
+                                                    호스트를 선택하세요
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ==================== 스캔 결과(히스토리) 탭 ==================== -->
+            <div class="tab-pane fade" id="scanHistory" role="tabpanel">
+                <div class="row">
+                    <div class="col-md-4">
+                        <!-- 히스토리 목록 -->
+                        <div class="card">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-clock-history me-1"></i>스캔 히스토리</span>
+                                <div class="btn-group btn-group-sm">
+                                    <button class="btn btn-outline-secondary active" id="historyFilterAll">전체</button>
+                                    <button class="btn btn-outline-secondary" id="historyFilterLocal">로컬</button>
+                                    <button class="btn btn-outline-secondary" id="historyFilterRemote">원격</button>
+                                </div>
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="list-group list-group-flush" id="historyList"
+                                    style="max-height: 600px; overflow-y: auto;">
+                                    <div class="text-center text-muted py-4">
+                                        스캔 기록이 없습니다
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-8">
+                        <!-- 선택된 스캔 결과 상세 -->
+                        <div class="card mb-3">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-info-circle me-1"></i>스캔 상세 정보</span>
+                                <button class="btn btn-sm btn-outline-danger" id="deleteHistoryBtn" disabled>
+                                    <i class="bi bi-trash me-1"></i>삭제
+                                </button>
+                            </div>
+                            <div class="card-body" id="historyDetailInfo">
+                                <div class="text-center text-muted py-3">
+                                    히스토리를 선택하세요
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 선택된 스캔의 취약점 목록 -->
+                        <div class="card">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-bug me-1"></i>발견된 취약점</span>
+                                <button class="btn btn-sm btn-outline-secondary" id="historyExportCsvBtn" disabled>
+                                    <i class="bi bi-download me-1"></i>CSV
+                                </button>
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                                    <table class="table table-hover table-sm mb-0">
+                                        <thead class="sticky-top bg-white">
+                                            <tr>
+                                                <th>패키지</th>
+                                                <th>CVE ID</th>
+                                                <th>CVSS</th>
+                                                <th>위험도</th>
+                                                <th>EPSS</th>
+                                                <th>KEV</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="historyFindingsBody">
+                                            <tr>
+                                                <td colspan="6" class="text-center text-muted py-4">
+                                                    히스토리를 선택하면 결과가 표시됩니다
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ==================== 호스트 편집 모달 ==================== -->
+    <div class="modal fade" id="hostModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="hostModalTitle">
+                        <i class="bi bi-plus-circle me-1"></i>호스트 등록
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="hostForm">
+                        <input type="hidden" id="hostId">
+                        <div class="row mb-3">
+                            <div class="col-6">
+                                <label class="form-label small">호스트명 <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control form-control-sm" id="hostHostname" required>
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small">IP 주소 <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control form-control-sm" id="hostIpAddress" required>
+                            </div>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-4">
+                                <label class="form-label small">SSH 포트</label>
+                                <input type="number" class="form-control form-control-sm" id="hostSshPort" value="22">
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label small">사용자명</label>
+                                <input type="text" class="form-control form-control-sm" id="hostSshUsername"
+                                    value="root">
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label small">인증방식</label>
+                                <select class="form-select form-select-sm" id="hostAuthMethod">
+                                    <option value="key">SSH 키</option>
+                                    <option value="password">비밀번호</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="mb-3" id="sshKeyGroup">
+                            <label class="form-label small">SSH 키 경로</label>
+                            <input type="text" class="form-control form-control-sm" id="hostSshKeyPath"
+                                placeholder="~/.ssh/id_rsa">
+                        </div>
+                        <div class="mb-3" id="sshPasswordGroup" style="display:none;">
+                            <label class="form-label small">SSH 비밀번호</label>
+                            <input type="password" class="form-control form-control-sm" id="hostSshPassword">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small">태그</label>
+                            <input type="text" class="form-control form-control-sm" id="hostTags"
+                                placeholder="lab, alpine, arm">
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="hostIsAllowed" checked>
+                            <label class="form-check-label small" for="hostIsAllowed">스캔 허용 (Allowlist)</label>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-danger me-auto" id="hostDeleteBtn"
+                        style="display:none;">
+                        <i class="bi bi-trash"></i> 삭제
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">취소</button>
+                    <button type="button" class="btn btn-primary" id="hostSaveBtn">저장</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== CVE 상세 모달 ==================== -->
+    <div class="modal fade" id="cveDetailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="cveDetailTitle">CVE 상세 정보</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="cveDetailBody">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+
+</html>

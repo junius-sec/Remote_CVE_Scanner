@@ -1,0 +1,12 @@
+NVD API 초기화: API 키 사용, 동시 요청: 5개, Delay: 0.6초, 캐시: SQLite 영속
+EPSS API 클라이언트 초기화: 병렬 20개, 지연 100ms
+Traceback (most recent call last):
+  File "/home/user/바탕화면/dev/trigger_scan.py", line 82, in <module>
+    asyncio.run(quick_scan())
+  File "/usr/lib/python3.10/asyncio/runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "/usr/lib/python3.10/asyncio/base_events.py", line 649, in run_until_complete
+    return future.result()
+  File "/home/user/바탕화면/dev/trigger_scan.py", line 27, in quick_scan
+    matcher = VulnerabilityMatcher(
+TypeError: VulnerabilityMatcher.__init__() got an unexpected keyword argument 'exploit_client'
