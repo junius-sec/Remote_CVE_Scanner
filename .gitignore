@@ -27,11 +27,6 @@ wheels/
 # Database (스캔 결과만 제외)
 vulnscan.db
 
-# 대용량 캐시 파일 (다운로드 필요)
-nvd_cache.db
-debian_security_cache.json
-ubuntu_security_cache.json
-
 # 개발 중 생성되는 임시 파일
 *.db-journal
 *.db-wal
