@@ -13,12 +13,14 @@ class NVDClient:
 
     def __init__(self, api_key: Optional[str] = None, verbose: bool = True):
         self.api_key = api_key or os.getenv("NVD_API_KEY")
-        self.verbose = verbose  # 로깅 제어용
+        self.verbose = verbose
         self.headers = {
             "User-Agent": "VulnScanner/1.0 (Python/httpx)"
         }
-        if self.api_key:
+        if self.api_key and self.api_key.strip() and self.api_key != "여기에_NVD_API_키_입력":
             self.headers["apiKey"] = self.api_key
+        else:
+            self.api_key = None
 
         # Rate limiting settings (NVD 공식 제한 준수)
         # API 키 없음: 30초당 5회 = 6초당 1회
@@ -1057,33 +1059,47 @@ class NVDClient:
         except:
             return None
 
-    async def download_year_data(self, year: int, progress_callback=None) -> Dict:
+    async def download_year_data(self, year: int, progress_callback=None, force: bool = False) -> Dict:
         """
         특정 년도의 모든 CVE 데이터를 다운로드하여 캐시에 저장
 
         Args:
             year: 다운로드할 년도 (예: 2024)
             progress_callback: 진행상황 콜백 함수 (current, total, message)
+            force: True이면 이미 다운로드된 데이터도 재다운로드
 
         Returns:
-            Dict: 다운로드 통계 {"total": int, "cached": int, "year": int}
+            Dict: 다운로드 통계 {"total": int, "cached": int, "year": int, "skipped": bool}
         """
         from datetime import datetime as dt
 
-        print(f"\n[NVD 년도별 다운로드] {year}년 CVE 데이터 다운로드 시작...")
+        # 이미 다운로드된 년도인지 확인
+        if not force:
+            cache_key = f"__year_{year}__"
+            existing_cves = self._get_cached(cache_key)
+            if existing_cves:
+                print(f"\n[NVD] {year} already downloaded ({len(existing_cves)} CVEs), skipping...")
+                return {
+                    "year": year,
+                    "total": len(existing_cves),
+                    "cached_packages": 0,
+                    "cache_key": cache_key,
+                    "skipped": True
+                }
+
+        print(f"\n[NVD] Downloading {year} CVE data...")
 
         all_cves = []
 
-        # NVD API 2.0는 날짜 범위가 120일로 제한되므로, 년도를 120일 청크로 분할
         from datetime import datetime as dt, timedelta
 
         year_start = dt(year, 1, 1)
         year_end = dt(year, 12, 31, 23, 59, 59)
 
         current_start = year_start
-        chunk_days = 119  # 120일 미만으로 안전하게
+        chunk_days = 119
 
-        print(f"  년도를 120일 단위로 분할하여 다운로드...")
+        print(f"  Splitting year into 120-day chunks...")
 
         while current_start <= year_end:
             current_end = min(current_start + timedelta(days=chunk_days), year_end)
@@ -1091,24 +1107,20 @@ class NVDClient:
             start_date_str = current_start.strftime("%Y-%m-%dT%H:%M:%S.000")
             end_date_str = current_end.strftime("%Y-%m-%dT%H:%M:%S.999")
 
-            print(f"  청크: {current_start.strftime('%Y-%m-%d')} ~ {current_end.strftime('%Y-%m-%d')}")
+            print(f"  Chunk: {current_start.strftime('%Y-%m-%d')} ~ {current_end.strftime('%Y-%m-%d')}")
 
-            # 청크 다운로드
             chunk_cves = await self._download_date_range(start_date_str, end_date_str, progress_callback)
             all_cves.extend(chunk_cves)
 
-            # 다음 청크로 이동
             current_start = current_end + timedelta(seconds=1)
 
-        print(f"  총 {len(all_cves)}개 CVE 다운로드 완료")
+        print(f"  Total {len(all_cves)} CVEs downloaded")
 
-        # 다운로드한 CVE들을 캐시에 저장
-        print(f"  년도별 캐시 저장 중... ({len(all_cves)}개 CVE)")
+        print(f"  Caching year data... ({len(all_cves)} CVEs)")
         cache_key = f"__year_{year}__"
         self._set_cached(cache_key, all_cves)
-        print(f"  ✓ 년도별 캐시 완료")
+        print(f"  Year cache completed")
 
-        # CPE에서 고유 패키지 수 계산
         packages = set()
         for cve in all_cves:
             cpe_list = cve.get('cpe_list')
@@ -1120,19 +1132,19 @@ class NVDClient:
                         packages.add(parts[4])
         
         package_count = len(packages)
-        print(f"  고유 패키지 수: {package_count}개")
+        print(f"  Unique packages: {package_count}")
 
-        # 다운로드 기록 저장
         self._save_download_record(year, len(all_cves), package_count)
 
         if progress_callback:
-            await progress_callback(len(all_cves), len(all_cves), f"완료! {len(all_cves)}개 CVE 다운로드")
+            await progress_callback(len(all_cves), len(all_cves), f"Done! {len(all_cves)} CVEs downloaded")
 
         return {
             "year": year,
             "total": len(all_cves),
             "cached_packages": package_count,
-            "cache_key": cache_key
+            "cache_key": cache_key,
+            "skipped": False
         }
 
     async def _download_date_range(self, start_date: str, end_date: str, progress_callback=None) -> List[Dict]:
@@ -1143,17 +1155,14 @@ class NVDClient:
         total_results = None
 
         while True:
-            # 진행상황 콜백
             if progress_callback and total_results:
-                await progress_callback(start_index, total_results, f"다운로드 중... ({start_index}/{total_results})")
+                await progress_callback(start_index, total_results, f"Downloading... ({start_index}/{total_results})")
 
-            # URL을 직접 구성 (httpx params 인코딩 이슈 회피)
             url = f"{self.BASE_URL}?pubStartDate={start_date}&pubEndDate={end_date}&resultsPerPage={results_per_page}&startIndex={start_index}"
 
-            # 디버깅: 첫 요청만 URL 출력
             if start_index == 0:
-                print(f"  [DEBUG] 전체 URL: {url}")
-                print(f"  [DEBUG] 헤더: {self.headers}")
+                print(f"  [DEBUG] Full URL: {url}")
+                print(f"  [DEBUG] Headers: {self.headers}")
 
             # API 호출 (rate limiting 포함 - 다운로드는 더 빠른 속도)
             async with self._semaphore:
@@ -1166,25 +1175,22 @@ class NVDClient:
                             headers=self.headers
                         )
 
-                        # 디버깅: 첫 요청 응답 상태 및 본문 출력
                         if start_index == 0:
-                            print(f"  [DEBUG] 응답 상태: {response.status_code}")
+                            print(f"  [DEBUG] Response status: {response.status_code}")
                             if response.status_code == 404:
-                                print(f"  [DEBUG] 응답 본문: {response.text[:500]}")
+                                print(f"  [DEBUG] Response body: {response.text[:500]}")
                         response.raise_for_status()
                         data = response.json()
 
-                        # 전체 결과 수 확인
                         if total_results is None:
                             total_results = data.get("totalResults", 0)
-                            print(f"  총 {total_results}개 CVE 발견")
+                            print(f"  Total {total_results} CVEs found")
 
-                        # CVE 파싱
                         vulnerabilities = data.get("vulnerabilities", [])
                         parsed_cves = [self._parse_cve(vuln) for vuln in vulnerabilities]
                         all_cves.extend(parsed_cves)
 
-                        print(f"  진행: {len(all_cves)}/{total_results} CVE 다운로드 완료")
+                        print(f"  Progress: {len(all_cves)}/{total_results} CVEs downloaded")
 
                         # 다음 페이지 확인
                         if len(all_cves) >= total_results:
@@ -1194,22 +1200,22 @@ class NVDClient:
 
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 429:
-                        print(f"  Rate limit 도달, 60초 대기...")
+                        print(f"  Rate limit reached, waiting 60 seconds...")
                         await asyncio.sleep(60)
                         continue
                     elif e.response.status_code == 404:
-                        print(f"  {year}년 데이터 없음 (404) - 정상 (미래 년도 또는 데이터 미존재)")
+                        print(f"  No data for this date range (404) - Normal for future dates")
                         break
                     else:
-                        print(f"  HTTP 에러: {e}")
+                        print(f"  HTTP error: {e}")
                         break
                 except Exception as e:
-                    print(f"    에러: {e}")
+                    print(f"  Error: {e}")
                     break
 
         return all_cves
 
-    async def download_year_range(self, start_year: int, end_year: int = 2026, progress_callback=None) -> Dict:
+    async def download_year_range(self, start_year: int, end_year: int = 2026, progress_callback=None, force: bool = False) -> Dict:
         """
         년도 범위의 CVE 데이터를 순차적으로 다운로드
 
@@ -1217,6 +1223,7 @@ class NVDClient:
             start_year: 시작 년도
             end_year: 종료 년도 (기본값: 2026)
             progress_callback: 진행상황 콜백
+            force: True이면 이미 다운로드된 데이터도 재다운로드
 
         Returns:
             Dict: 전체 다운로드 통계
@@ -1224,19 +1231,23 @@ class NVDClient:
         total_cves = 0
         total_packages = 0
         downloaded_years = []
+        skipped_years = []
 
         for year in range(start_year, end_year + 1):
             try:
-                print(f"\n[범위 다운로드] {year}년 처리 중... ({year - start_year + 1}/{end_year - start_year + 1})")
+                print(f"\n[Range Download] Processing {year}... ({year - start_year + 1}/{end_year - start_year + 1})")
 
-                result = await self.download_year_data(year, progress_callback)
+                result = await self.download_year_data(year, progress_callback, force=force)
 
                 total_cves += result['total']
-                total_packages += result['cached_packages']
-                downloaded_years.append(year)
+                total_packages += result.get('cached_packages', 0)
+                if result.get('skipped'):
+                    skipped_years.append(year)
+                else:
+                    downloaded_years.append(year)
 
             except Exception as e:
-                print(f"[에러] {year}년 다운로드 실패: {e}")
+                print(f"[Error] Failed to download {year}: {e}")
                 continue
 
         return {
@@ -1244,7 +1255,8 @@ class NVDClient:
             "end_year": end_year,
             "total_cves": total_cves,
             "total_packages": total_packages,
-            "downloaded_years": downloaded_years
+            "downloaded_years": downloaded_years,
+            "skipped_years": skipped_years
         }
 
     def _save_download_record(self, year: int, cve_count: int, package_count: int):
