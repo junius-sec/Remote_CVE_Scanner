@@ -80,15 +80,16 @@ class PackageUsageAnalyzer:
         self._cache_time: float = 0
         self._cache_ttl: float = 600  # 10분 캐시 (스캔 중 재실행 방지)
         self._ssh_executor = None  # SSH executor for remote scanning
+        self._binary_atime_cache: Dict[str, Dict] = {}  # 바이너리명 -> {timestamp, last_access, path}
 
     def set_ssh_executor(self, ssh_executor):
         """원격 스캔을 위한 SSH executor 설정"""
         self._ssh_executor = ssh_executor
 
     async def preload_process_cache(self):
-        """프로세스 캐시를 미리 로드 (CVE 스캔 전에 호출)"""
+        """프로세스 캐시 + 바이너리 atime 캐시를 미리 로드 (스캔 전 1회 호출)"""
+        # === 1) ps aux 프로세스 목록 캐시 ===
         try:
-            # SSH executor가 있으면 원격으로 실행, 없으면 로컬 실행
             if self._ssh_executor:
                 result = await self._ssh_executor.execute("ps aux")
                 if result.success:
@@ -104,10 +105,8 @@ class PackageUsageAnalyzer:
                 stdout_bytes, _ = await result.communicate()
                 stdout = stdout_bytes.decode()
 
-            # 프로세스 목록 파싱하여 캐시에 저장
-            lines = stdout.strip().split('\n')[1:]  # 헤더 제외
+            lines = stdout.strip().split('\n')[1:]
             all_processes = []
-            
             for line in lines:
                 parts = line.split(None, 10)
                 if len(parts) >= 11:
@@ -122,56 +121,14 @@ class PackageUsageAnalyzer:
                             "start": start
                         })
                     except (ValueError, IndexError):
-                        # 파싱 실패 시 스킵
                         continue
-            
             self._process_cache = all_processes
             self._cache_time = time.time()
             print(f"[프로세스 캐시] {len(all_processes)}개 로드됨")
-            
         except Exception as e:
             print(f"[WARN] 프로세스 캐시 로드 실패: {e}")
-        """프로세스 캐시를 미리 로드 (CVE 스캔 전에 호출)"""
-        try:
-            # SSH executor가 있으면 원격으로 실행, 없으면 로컬 실행
-            if self._ssh_executor:
-                result = await self._ssh_executor.execute("ps aux")
-                if result.success:
-                    stdout = result.stdout
-                else:
-                    return
-            else:
-                result = await asyncio.create_subprocess_exec(
-                    "ps", "aux",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout_bytes, _ = await result.communicate()
-                stdout = stdout_bytes.decode()
 
-            # 프로세스 목록 파싱하여 캐시에 저장
-            lines = stdout.strip().split('\n')[1:]  # 헤더 제외
-            all_processes = []
-            
-            for line in lines:
-                parts = line.split(None, 10)
-                if len(parts) >= 11:
-                    user, pid, cpu, mem, vsz, rss, tty, stat, start, time_str, cmd = parts
-                    all_processes.append({
-                        "user": user,
-                        "pid": int(pid),
-                        "cpu": float(cpu),
-                        "mem": float(mem),
-                        "cmd": cmd,
-                        "start": start
-                    })
-            
-            self._process_cache = all_processes
-            self._cache_time = time.time()
-            print(f"[PackageUsageAnalyzer] Preloaded {len(all_processes)} processes into cache")
-            
-        except Exception as e:
-            print(f"[WARN] Failed to preload process cache: {e}")
+        # 바이너리 atime은 스캔 후 CVE 있는 패키지만 별도 수집 (load_binary_atimes_for_packages)
 
     async def analyze_package(self, package_name: str) -> Dict:
         """
@@ -212,16 +169,12 @@ class PackageUsageAnalyzer:
             result["is_running"] = True
             result["running_processes"] = running_procs
 
-        # 2-3. systemd/네트워크 체크 제거 (성능 최적화)
-        # SSH 환경에서는 작동 안 하고, 로컬에서도 느림
-
-        # 4. 바이너리 파일 마지막 사용 시간 확인 (SSH일 때는 스킵 - 너무 느림)
-        if not self._ssh_executor:
-            binary_info = await self._check_binary_access_time(package_name)
-            if binary_info:
-                result["last_used"] = binary_info.get("last_access")
-                result["last_used_timestamp"] = binary_info.get("timestamp")
-                result["binary_paths"] = binary_info.get("paths", [])
+        # 2. 바이너리 atime은 캐시에 있으면 사용 (스캔 후 load_binary_atimes_for_packages로 수집된 경우)
+        binary_info = self._get_binary_atime_from_cache(package_name)
+        if binary_info:
+            result["last_used"] = binary_info.get("last_access")
+            result["last_used_timestamp"] = binary_info.get("timestamp")
+            result["binary_paths"] = binary_info.get("paths", [])
 
         # 5. 사용 수준 결정 및 위험도 가중치 계산
         result["usage_level"] = self._determine_usage_level(result)
@@ -415,6 +368,272 @@ class PackageUsageAnalyzer:
                 "paths": binary_paths[:5],  # 상위 5개만
                 "last_access": last_access,
                 "timestamp": timestamp
+            }
+        return None
+
+    async def load_binary_atimes_for_packages(self, package_names: List[str]):
+        """특정 패키지들의 바이너리 최근 실행 시간을 한번에 수집 (CVE 발견된 패키지만)
+        
+        스캔 완료 후 호출.
+        1단계: dpkg -L로 패키지별 실제 설치 파일 목록 조회 (SSH 1회)
+        2단계: 실행파일 경로들의 atime 조회 (SSH 1회)
+        => 패키지명↔바이너리명 불일치 문제 완전 해결
+        """
+        if not package_names:
+            return
+        
+        print(f"[실행시간] CVE 발견된 {len(package_names)}개 패키지의 바이너리 최근 실행 시간 수집 중...")
+        
+        # === 1단계: dpkg -L로 패키지별 실제 실행파일 경로 조회 (SSH 1회) ===
+        pkg_to_binaries = await self._resolve_package_binaries(package_names)
+        
+        # 발견된 모든 실행파일 경로
+        all_binary_paths = set()
+        for paths in pkg_to_binaries.values():
+            all_binary_paths.update(paths)
+        
+        # dpkg -L로 못 찾은 패키지는 기존 매핑/이름 추론 폴백
+        for pkg in package_names:
+            if pkg not in pkg_to_binaries or not pkg_to_binaries[pkg]:
+                fallback_exes = self._get_executables_for_package(pkg)
+                fallback_paths = []
+                for exe in fallback_exes:
+                    for prefix in ['/usr/bin/', '/usr/sbin/', '/bin/', '/sbin/']:
+                        path = prefix + exe
+                        all_binary_paths.add(path)
+                        fallback_paths.append(path)
+                # 폴백 경로도 pkg_to_binaries에 등록 (3단계에서 패키지명 키로 등록하기 위해)
+                if fallback_paths:
+                    pkg_to_binaries[pkg] = fallback_paths
+        
+        if not all_binary_paths:
+            print(f"[실행시간] 실행파일 없음")
+            return
+        
+        # === 2단계: 실행파일들의 atime 한번에 조회 (SSH 1회) ===
+        await self._load_atimes_for_paths(list(all_binary_paths))
+        
+        # === 3단계: 패키지→바이너리 매핑으로 캐시 보강 ===
+        # dpkg -L 결과를 _binary_atime_cache에 패키지명으로도 접근 가능하게
+        # 패키지의 여러 바이너리 중 가장 최근에 사용된 것을 등록
+        for pkg, paths in pkg_to_binaries.items():
+            pkg_lower = pkg.lower()
+            best_cached = None
+            all_paths = []
+            
+            for p in paths:
+                fname = os.path.basename(p)
+                # 이미 캐시에 있는지 확인
+                if fname in self._binary_atime_cache:
+                    cached = self._binary_atime_cache[fname]
+                    all_paths.append(cached['path'])
+                    
+                    # 가장 최근 것 선택
+                    if best_cached is None or cached['timestamp'] > best_cached['timestamp']:
+                        best_cached = cached
+            
+            # 패키지명 키로 가장 최근 바이너리 정보 등록 (모든 경로 포함)
+            if best_cached:
+                self._binary_atime_cache[pkg_lower] = {
+                    'timestamp': best_cached['timestamp'],
+                    'last_access': best_cached['last_access'],
+                    'path': best_cached['path'],
+                    'all_paths': all_paths[:5]  # 최대 5개
+                }
+        
+        # 매칭 카운트
+        matched = 0
+        for pkg in package_names:
+            if self._get_binary_atime_from_cache(pkg):
+                matched += 1
+        print(f"[실행시간] {matched}/{len(package_names)}개 패키지 매칭 완료")
+
+    async def _resolve_package_binaries(self, package_names: List[str]) -> Dict[str, List[str]]:
+        """dpkg -L (또는 rpm -ql / apk info -L)로 패키지별 실제 실행파일 경로를 조회
+        
+        SSH 1회로 모든 패키지의 파일 목록을 가져와서 /usr/bin, /usr/sbin, /bin, /sbin
+        안에 있는 실행파일만 필터링.
+        """
+        pkg_to_binaries: Dict[str, List[str]] = {}
+        bin_dirs = {'/usr/bin', '/usr/sbin', '/bin', '/sbin'}
+        
+        # 각 패키지별로 구분 가능하게 separator 출력
+        # exit code 항상 0으로 보장 (echo __DONE__ 마커)
+        pkg_list_str = ' '.join(f'"{p}"' for p in package_names)
+        cmd = (
+            f"for p in {pkg_list_str}; do "
+            f"echo \"__PKG__:$p\"; "
+            f"dpkg -L \"$p\" 2>/dev/null || "
+            f"rpm -ql \"$p\" 2>/dev/null || "
+            f"apk info -L \"$p\" 2>/dev/null || "
+            f"true; "
+            f"done; echo __DONE__"
+        )
+        
+        try:
+            if self._ssh_executor:
+                result = await self._ssh_executor.execute(cmd, timeout=30)
+                stdout = result.stdout if result.stdout else ''
+                # success 체크 안 함 - __DONE__ 마커로 확인
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout_bytes, _ = await proc.communicate()
+                stdout = stdout_bytes.decode()
+            
+            if not stdout or not stdout.strip():
+                print(f"[dpkg -L] 응답 없음")
+                return pkg_to_binaries
+            
+            current_pkg = None
+            for line in stdout.strip().split('\n'):
+                line = line.strip()
+                if not line or line == '__DONE__':
+                    continue
+                
+                if line.startswith('__PKG__:'):
+                    current_pkg = line[8:].strip()
+                    if current_pkg not in pkg_to_binaries:
+                        pkg_to_binaries[current_pkg] = []
+                    continue
+                
+                if current_pkg is None:
+                    continue
+                
+                # /usr/bin/xxx, /usr/sbin/xxx, /bin/xxx, /sbin/xxx 만 필터
+                filepath = line
+                parent_dir = os.path.dirname(filepath)
+                if parent_dir in bin_dirs:
+                    pkg_to_binaries[current_pkg].append(filepath)
+            
+            total_bins = sum(len(v) for v in pkg_to_binaries.values())
+            found_pkgs = sum(1 for v in pkg_to_binaries.values() if v)
+            print(f"[dpkg -L] {found_pkgs}/{len(package_names)}개 패키지에서 {total_bins}개 실행파일 발견")
+            
+        except Exception as e:
+            print(f"[WARN] dpkg -L 조회 실패: {e}")
+        
+        return pkg_to_binaries
+
+    async def _load_atimes_for_paths(self, binary_paths: List[str]):
+        """실행파일 경로 목록의 atime을 한번에 수집 (SSH 1회)
+        
+        - for루프로 각 파일 stat → 존재하지 않는 파일은 에러 없이 스킵
+        - exit code 항상 0 (success=True 보장)
+        - ARG_MAX 문제 없음 (stdin으로 전달)
+        """
+        if not binary_paths:
+            return
+        
+        # 중복 제거 및 정리
+        unique_paths = list(set(p.strip() for p in binary_paths if p.strip()))
+        
+        # for 루프로 각 파일의 mtime 출력 (존재하지 않으면 skip, exit code 항상 0)
+        # 쿼트 문제 없는 포맷
+        paths_joined = '\n'.join(unique_paths)
+        cmd = (
+            f"printf '{paths_joined}\\n' | while IFS= read -r f; do "
+            f"[ -f \"$f\" ] && stat -c \"%Y %n\" \"$f\" 2>/dev/null; "
+            f"done; echo __DONE__"
+        )
+        
+        try:
+            if self._ssh_executor:
+                result = await self._ssh_executor.execute(cmd, timeout=30)
+                stdout = result.stdout if result.stdout else ''
+                # success 체크 안 함 - __DONE__ 마커로 확인
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout_bytes, _ = await proc.communicate()
+                stdout = stdout_bytes.decode()
+            
+            if not stdout or not stdout.strip():
+                print(f"[WARN] atime 수집: 빈 응답")
+                return
+            
+            count = 0
+            for line in stdout.strip().split('\n'):
+                line = line.strip()
+                if not line or line == '__DONE__':
+                    continue
+                parts = line.split(' ', 1)
+                if len(parts) != 2:
+                    continue
+                try:
+                    ts_str, filepath = parts
+                    ts = float(ts_str)
+                    filename = os.path.basename(filepath.strip())
+                    
+                    if filename not in self._binary_atime_cache or ts > self._binary_atime_cache[filename]['timestamp']:
+                        self._binary_atime_cache[filename] = {
+                            'timestamp': ts,
+                            'last_access': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M'),
+                            'path': filepath.strip()
+                        }
+                        count += 1
+                except (ValueError, IndexError):
+                    continue
+            
+            print(f"[실행시간] {count}개 실행파일 atime 수집 완료 (대상 {len(unique_paths)}개)")
+        except Exception as e:
+            print(f"[WARN] atime 수집 실패: {e}")
+
+    async def _preload_binary_atime_cache(self):
+        """하위 호환용 - 새 메서드로 대체됨"""
+        pass
+
+    def _get_binary_atime_from_cache(self, package_name: str) -> Optional[Dict]:
+        """캐시에서 패키지의 바이너리 최근 실행 시간 조회 (즉시 반환, IO 없음)"""
+        if not hasattr(self, '_binary_atime_cache') or not self._binary_atime_cache:
+            return None
+        
+        best_ts = None
+        best_access = None
+        matched_paths = []
+        
+        # 1순위: dpkg -L로 등록된 패키지명 직접 조회 (pkg_lower 키)
+        pkg_lower = package_name.lower()
+        cached = self._binary_atime_cache.get(pkg_lower)
+        if cached:
+            return {
+                'paths': cached.get('all_paths', [cached['path']]),
+                'last_access': cached['last_access'],
+                'timestamp': cached['timestamp']
+            }
+        
+        # 2순위: 바이너리명으로 조회 (기존 매핑 기반)
+        executables = self._get_executables_for_package(package_name)
+        for exe in executables:
+            cached = self._binary_atime_cache.get(exe)
+            if cached:
+                matched_paths.append(cached['path'])
+                if best_ts is None or cached['timestamp'] > best_ts:
+                    best_ts = cached['timestamp']
+                    best_access = cached['last_access']
+        
+        # 3순위: 패키지명 부분 매칭 (폴백)
+        if not matched_paths:
+            pkg_base = package_name.split('-')[0].lower() if '-' in package_name else package_name.lower()
+            for filename, cached in self._binary_atime_cache.items():
+                if filename == pkg_base:
+                    matched_paths.append(cached['path'])
+                    if best_ts is None or cached['timestamp'] > best_ts:
+                        best_ts = cached['timestamp']
+                        best_access = cached['last_access']
+                    break
+        
+        if matched_paths:
+            return {
+                'paths': matched_paths[:5],
+                'last_access': best_access,
+                'timestamp': best_ts
             }
         return None
 

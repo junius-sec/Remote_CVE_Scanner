@@ -96,11 +96,15 @@ async def favicon():
 
 if __name__ == "__main__":
     import uvicorn
-    # 127.0.0.1 = localhost 전용 (외부 접근 차단)
+    import os
+    # Docker: HOST=0.0.0.0 (외부 접근 허용)
+    # 로컬:   기본 127.0.0.1 (localhost 전용)
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
     uvicorn.run(
         app, 
-        host="127.0.0.1", 
-        port=8000,
-        log_level="warning",  # HTTP 요청 로그 숨기기
-        access_log=False  # access log 완전히 끄기
+        host=host, 
+        port=port,
+        log_level="warning",
+        access_log=False
     )

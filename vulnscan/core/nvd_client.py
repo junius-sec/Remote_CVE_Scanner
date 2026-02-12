@@ -36,7 +36,8 @@ class NVDClient:
 
         # SQLite 영속 캐시 설정
         self._cache_ttl = 86400  # 24 hours
-        self._cache_db_path = os.path.join(os.path.dirname(__file__), "..", "..", "nvd_cache.db")
+        _data_dir = os.getenv("DATA_DIR", ".")
+        self._cache_db_path = os.path.join(_data_dir, "nvd_cache.db")
         self._init_cache_db()
         
         # 메모리 캐시 (년도별 CVE 데이터) - 속도 향상용
@@ -64,9 +65,9 @@ class NVDClient:
         """)
         conn.commit()
         
-        # 오래된 캐시 삭제 (24시간 이상)
+        # 오래된 캐시 삭제 (24시간 이상) - 단, 년도별 영구 데이터(__year_)는 보존
         cutoff = time.time() - self._cache_ttl
-        cursor = conn.execute("DELETE FROM nvd_cache WHERE timestamp < ?", (cutoff,))
+        cursor = conn.execute("DELETE FROM nvd_cache WHERE timestamp < ? AND keyword NOT LIKE '__year_%'", (cutoff,))
         deleted = cursor.rowcount
         
         # 레코드 수 확인
@@ -1281,7 +1282,7 @@ class NVDClient:
         conn.close()
 
     def get_download_records(self) -> List[Dict]:
-        """다운로드 기록 조회"""
+        """다운로드 기록 조회 (실제 캐시 데이터 존재 여부도 검증)"""
         conn = sqlite3.connect(self._cache_db_path)
 
         # 테이블이 없으면 생성
@@ -1302,8 +1303,22 @@ class NVDClient:
         """)
 
         records = []
+        orphaned_years = []
         for row in cursor.fetchall():
             year, cve_count, pkg_count, downloaded_at, size_bytes = row
+            
+            # 실제 캐시 데이터 존재 여부 확인
+            cache_key = f"__year_{year}__"
+            cache_check = conn.execute(
+                "SELECT 1 FROM nvd_cache WHERE keyword = ? LIMIT 1",
+                (cache_key,)
+            ).fetchone()
+            
+            if cache_check is None:
+                # 기록은 있지만 실제 데이터가 없는 경우 (고아 레코드)
+                orphaned_years.append(year)
+                continue
+            
             records.append({
                 "year": year,
                 "cve_count": cve_count,
@@ -1312,6 +1327,13 @@ class NVDClient:
                 "size_bytes": size_bytes,
                 "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else 0
             })
+
+        # 고아 레코드 정리 (실제 데이터가 없는 다운로드 기록 삭제)
+        if orphaned_years:
+            print(f"[정리] 실제 데이터가 없는 다운로드 기록 {len(orphaned_years)}개 정리: {sorted(orphaned_years)}")
+            for year in orphaned_years:
+                conn.execute("DELETE FROM download_records WHERE year = ?", (year,))
+            conn.commit()
 
         conn.close()
         return records

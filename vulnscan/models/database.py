@@ -4,15 +4,18 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from .schemas import Base
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./vulnscan.db")
+# Docker: DATA_DIR=/app/data, 로컬: 현재 디렉토리
+_data_dir = os.getenv("DATA_DIR", ".")
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{_data_dir}/vulnscan.db")
 
 # Configure SQLite for better concurrency
+# Note: SQLite uses NullPool, so pool_size/max_overflow are not applicable
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     future=True,
     connect_args={
-        "timeout": 30,  # Increase timeout to 30 seconds
+        "timeout": 60,  # Increase timeout to 60 seconds
         "check_same_thread": False,
     }
 )
@@ -30,7 +33,9 @@ async def init_db():
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.execute(text("PRAGMA cache_size=-64000"))  # 64MB cache
-        await conn.execute(text("PRAGMA busy_timeout=30000"))  # 30 second timeout
+        await conn.execute(text("PRAGMA busy_timeout=60000"))  # 60 second timeout
+        await conn.execute(text("PRAGMA wal_autocheckpoint=1000"))  # Less frequent checkpoints
+        await conn.execute(text("PRAGMA temp_store=MEMORY"))  # Temp tables in memory
 
         await conn.run_sync(Base.metadata.create_all)
 
@@ -50,21 +55,22 @@ async def migrate_cve_cvss_data():
     from pathlib import Path
     
     # Check if migration was already completed
-    migration_flag = Path(".cvss_migration_done")
+    _data_dir = os.getenv("DATA_DIR", ".")
+    migration_flag = Path(_data_dir) / ".cvss_migration_done"
     if migration_flag.exists():
         return  # Already migrated
     
     # Check if nvd_cache.db exists
-    nvd_cache_path = Path("nvd_cache.db")
+    nvd_cache_path = Path(_data_dir) / "nvd_cache.db"
     if not nvd_cache_path.exists():
         return
     
     print("[Background] Checking CVE CVSS data migration...")
     
     # Connect to both databases
-    nvd_conn = sqlite3.connect('nvd_cache.db')
+    nvd_conn = sqlite3.connect(str(nvd_cache_path))
     nvd_cursor = nvd_conn.cursor()
-    vuln_conn = sqlite3.connect('vulnscan.db')
+    vuln_conn = sqlite3.connect(str(Path(_data_dir) / 'vulnscan.db'))
     vuln_cursor = vuln_conn.cursor()
     
     try:
@@ -75,8 +81,7 @@ async def migrate_cve_cvss_data():
         if null_count == 0:
             print("[Background] All CVEs already have CVSS scores, skipping migration")
             # Create migration flag file
-            from pathlib import Path
-            Path(".cvss_migration_done").touch()
+            migration_flag.touch()
             return
         
         print(f"[Background] Found {null_count} CVEs with missing CVSS scores, updating...")
@@ -139,8 +144,7 @@ async def migrate_cve_cvss_data():
         print(f"[Background] CVE CVSS migration completed: {updated} CVEs updated")
         
         # Create migration flag file
-        from pathlib import Path
-        Path(".cvss_migration_done").touch()
+        migration_flag.touch()
         
     finally:
         nvd_conn.close()

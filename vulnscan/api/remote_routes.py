@@ -951,7 +951,32 @@ async def cancel_scan_job(
     job.status = "cancelled"
     job.completed_at = datetime.now(KST)
     job.error_message = "Cancelled by user"
+    
+    # 연관된 ScanHistory도 취소 처리
+    try:
+        from ..models.schemas import ScanHistory
+        scan_results = await session.execute(
+            select(ScanHistory).where(
+                ScanHistory.host_id == job.host_id,
+                ScanHistory.status == "running"
+            )
+        )
+        running_scans = scan_results.scalars().all()
+        for scan in running_scans:
+            scan.status = "cancelled"
+            scan.scan_completed = datetime.now(KST)
+    except Exception:
+        pass  # ScanHistory 업데이트 실패해도 취소는 진행
+    
     await session.commit()
+    
+    # JobRunner의 인메모리 상태도 업데이트
+    try:
+        from ..services.job_runner import get_job_runner
+        runner = get_job_runner()
+        await runner.cancel_job(job_id)
+    except Exception:
+        pass  # JobRunner 업데이트 실패해도 DB는 이미 취소됨
     
     return {"job_id": job_id, "status": "cancelled"}
 

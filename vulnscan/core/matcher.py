@@ -7,7 +7,7 @@ from ..models.schemas import Host, Package, CVE, Finding
 from .nvd_client import NVDClient
 from .epss_client import EPSSClient
 from .debian_security_client import DebianSecurityClient
-from .kev_client import KEVClient, VulnerabilityPrioritizer
+from .kev_client import KEVClient
 from .package_usage_analyzer import PackageUsageAnalyzer, AptPatchChecker
 from .kernel_analyzer import KernelAnalyzer
 
@@ -28,12 +28,12 @@ class VulnerabilityMatcher:
         self.kev_client = kev_client or KEVClient()
         self.usage_analyzer = PackageUsageAnalyzer()
         self.patch_checker = AptPatchChecker()
-        self.prioritizer = VulnerabilityPrioritizer()
         self.kernel_analyzer = KernelAnalyzer()
 
         self._debian_initialized = False
         self._kev_initialized = False
         self._current_scan_id: Optional[int] = None
+        self._cancelled = False  # 스캔 취소 플래그
 
         # 스캔 옵션 기본값
         self._scan_options = {
@@ -53,6 +53,32 @@ class VulnerabilityMatcher:
             "privesc_count": 0,
             "kernel_cve_count": 0
         }
+
+    def cancel(self):
+        """스캔 취소"""
+        self._cancelled = True
+        print("[스캔] 취소 요청됨")
+
+    async def _check_cancelled(self, session: AsyncSession = None):
+        """스캔 취소 여부 확인 (DB에서도 체크)"""
+        if self._cancelled:
+            raise asyncio.CancelledError("스캔이 사용자에 의해 취소됨")
+        
+        # DB에서 ScanJob 상태 확인
+        if self._current_scan_id and session:
+            try:
+                from ..models.schemas import ScanHistory
+                result = await session.execute(
+                    select(ScanHistory).where(ScanHistory.id == self._current_scan_id)
+                )
+                scan = result.scalar_one_or_none()
+                if scan and scan.status == "cancelled":
+                    self._cancelled = True
+                    raise asyncio.CancelledError("스캔이 사용자에 의해 취소됨")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # DB 체크 실패는 무시
 
     def set_scan_options(self, options: dict):
         """스캔 옵션 설정"""
@@ -103,6 +129,7 @@ class VulnerabilityMatcher:
 
         # 현재 스캔 ID 저장 (findings에 연결용)
         self._current_scan_id = scan_id
+        self._cancelled = False  # 취소 플래그 초기화
         
         # 스캔 시작 전 NVD 클라이언트 상태 초기화
         self.nvd_client.reset_scan_state()
@@ -138,6 +165,13 @@ class VulnerabilityMatcher:
         await self.usage_analyzer.preload_process_cache()
 
         for idx, pkg_data in enumerate(packages, 1):
+            # 취소 체크
+            try:
+                await self._check_cancelled(session)
+            except asyncio.CancelledError:
+                print(f"[스캔] 취소됨 - {idx-1}/{total_packages} 패키지 처리 후 중단")
+                break
+
             # 진행률 업데이트
             if scan_id:
                 scan_result = await session.execute(
@@ -203,22 +237,40 @@ class VulnerabilityMatcher:
 
             # Finding 생성
             for cve_data in relevant_cves:
-                cve = await self._get_or_create_cve(session, cve_data)
-                await self._create_finding(
-                    session, host_id, package.id, cve.id, cve_data,
-                    usage_info=usage_info,
-                    patch_info=patch_info,
-                    pkg_name=pkg_data.get("name"),
-                    package_manager=pkg_data.get("package_manager")
-                )
-                total_cves += 1
+                try:
+                    cve = await self._get_or_create_cve(session, cve_data)
+                    await self._create_finding(
+                        session, host_id, package.id, cve.id, cve_data,
+                        usage_info=usage_info,
+                        patch_info=patch_info,
+                        pkg_name=pkg_data.get("name"),
+                        package_manager=pkg_data.get("package_manager")
+                    )
+                    total_cves += 1
 
-                # CVSS 점수: cvss_score (통합) > cvss_v3_score > cvss_v2_score
-                cvss_score = cve_data.get("cvss_score") or cve_data.get("cvss_v3_score") or cve_data.get("cvss_v2_score")
-                if cvss_score is not None and cvss_score >= 7.0:
-                    high_risk += 1
+                    # CVSS 점수: cvss_score (통합) > cvss_v3_score > cvss_v2_score
+                    cvss_score = cve_data.get("cvss_score") or cve_data.get("cvss_v3_score") or cve_data.get("cvss_v2_score")
+                    if cvss_score is not None and cvss_score >= 7.0:
+                        high_risk += 1
+                except Exception as e:
+                    error_str = str(e)
+                    if "rolled back" in error_str or "database is locked" in error_str:
+                        try:
+                            await session.rollback()
+                        except Exception:
+                            pass
+                        print(f"[에러] DB 오류 복구: {pkg_data['name']} - {cve_data.get('cve_id', '')}")
+                        continue
+                    raise
 
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception as e:
+                print(f"[에러] 커밋 실패, 롤백: {e}")
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
 
         # 커널 CVE 별도 스캔
         kernel_result = await self._scan_kernel_cves(session, host_id, scan_id)
@@ -353,23 +405,40 @@ class VulnerabilityMatcher:
                 continue
 
             # 모든 필터 통과 - 취약점으로 확정
-            cve = await self._get_or_create_cve(session, cve_data)
+            try:
+                cve = await self._get_or_create_cve(session, cve_data)
 
-            await self._create_finding(
-                session, host_id, package.id, cve.id, cve_data,
-                pkg_name="linux-kernel",
-                package_manager="system"
-            )
-            cve_count += 1
+                await self._create_finding(
+                    session, host_id, package.id, cve.id, cve_data,
+                    pkg_name="linux-kernel",
+                    package_manager="system"
+                )
+                cve_count += 1
 
-            cvss_score = cve_data.get("cvss_score") or cve_data.get("cvss_v3_score")
-            if cvss_score and cvss_score >= 7.0:
-                high_risk_count += 1
+                cvss_score = cve_data.get("cvss_score") or cve_data.get("cvss_v3_score")
+                if cvss_score and cvss_score >= 7.0:
+                    high_risk_count += 1
 
-            if cve_count <= 10:
-                print(f"  [커널 CVE] {cve_id}: CVSS={cvss_score}")
+                if cve_count <= 10:
+                    print(f"  [커널 CVE] {cve_id}: CVSS={cvss_score}")
+            except Exception as e:
+                error_str = str(e)
+                if "rolled back" in error_str or "database is locked" in error_str:
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    print(f"[커널] DB 오류 복구: {cve_id}")
+                    continue
 
-        await session.commit()
+        try:
+            await session.commit()
+        except Exception as e:
+            print(f"[커널] 커밋 실패, 롤백: {e}")
+            try:
+                await session.rollback()
+            except Exception:
+                pass
         
         print(f"[커널] 필터링 통계:")
         print(f"  - CPE 불일치 (linux_kernel 아님): {stats['not_kernel_cpe']}개")
@@ -618,11 +687,6 @@ class VulnerabilityMatcher:
                 cve["cvss_v3_score"] = 5.0
                 cve["cvss_v3_severity"] = "MEDIUM"
 
-        return {
-            "cve_count": cve_count,
-            "high_risk_count": high_risk_count
-        }
-
     def _print_patch_stats(self):
         """패치 필터링 통계 출력"""
         stats = self._stats
@@ -678,7 +742,14 @@ class VulnerabilityMatcher:
                         updated_count += 1
                 
                 # 배치마다 커밋
-                await session.commit()
+                try:
+                    await session.commit()
+                except Exception as ce:
+                    print(f"[EPSS] 커밋 실패, 롤백: {ce}")
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
                 
             except Exception as e:
                 print(f"[EPSS] 배치 {i}-{i+batch_size} 오류: {e}")
@@ -703,7 +774,14 @@ class VulnerabilityMatcher:
                 # KEV가 아닌 경우도 명시적으로 False로 설정
                 cve.is_kev = False
         
-        await session.commit()
+        try:
+            await session.commit()
+        except Exception as e:
+            print(f"[KEV] 커밋 실패, 롤백: {e}")
+            try:
+                await session.rollback()
+            except Exception:
+                pass
         print(f"[KEV]  {kev_updated}개 KEV CVE 발견")
 
     async def _get_or_create_package(
@@ -726,7 +804,7 @@ class VulnerabilityMatcher:
             query = query.where(Package.scan_id == scan_id)
         
         result = await session.execute(query)
-        package = result.scalar_one_or_none()
+        package = result.scalars().first()
 
         if not package:
             package = Package(
@@ -737,8 +815,16 @@ class VulnerabilityMatcher:
                 architecture=pkg_data.get("architecture", "unknown"),
                 package_manager=pkg_data.get("package_manager", "unknown")
             )
-            session.add(package)
-            await session.flush()
+            try:
+                session.add(package)
+                await session.flush()
+            except Exception as e:
+                await session.rollback()
+                # 재조회 시도
+                result = await session.execute(query)
+                package = result.scalars().first()
+                if not package:
+                    raise  # 재조회도 실패하면 에러 발생
 
         return package
 
@@ -751,7 +837,7 @@ class VulnerabilityMatcher:
         result = await session.execute(
             select(CVE).where(CVE.cve_id == cve_data["cve_id"])
         )
-        cve = result.scalar_one_or_none()
+        cve = result.scalars().first()
 
         if not cve:
             # EPSS/KEV는 스캔 완료 후 배치로 처리 (속도 향상)
@@ -795,8 +881,19 @@ class VulnerabilityMatcher:
                 kev_due_date=None,
                 kev_ransomware=False
             )
-            session.add(cve)
-            await session.flush()
+            try:
+                session.add(cve)
+                await session.flush()
+            except Exception as e:
+                # 중복 CVE 삽입 충돌 시 롤백 후 기존 레코드 조회
+                await session.rollback()
+                result = await session.execute(
+                    select(CVE).where(CVE.cve_id == cve_data["cve_id"])
+                )
+                cve = result.scalars().first()
+                if cve:
+                    return cve
+                raise  # 다른 에러면 재발생
         else:
             # Update existing CVE with missing data
             updated = False
@@ -861,12 +958,12 @@ class VulnerabilityMatcher:
                 Finding.scan_id == self._current_scan_id
             )
         )
-        existing = result.scalar_one_or_none()
+        existing = result.scalars().first()
 
         if existing:
             return
 
-        cvss_score = cve_data.get("cvss_v3_score", 0)
+        cvss_score = cve_data.get("cvss_v3_score") or cve_data.get("cvss_v2_score") or 0
         risk_level = self._calculate_risk_level(cvss_score)
 
         # KEV 확인
@@ -889,45 +986,54 @@ class VulnerabilityMatcher:
                 package_manager = pkg.package_manager
 
         # collector_mode 결정
-        # 시스템 패키지 (__OS__, __KERNEL__)만 os/kernel로 분류
-        # 일반 패키지는 모두 local로 분류
         if pkg_name and pkg_name.startswith('__'):
-            # 시스템 패키지
             if 'KERNEL' in pkg_name:
                 collector_mode = "kernel"
             else:
                 collector_mode = "os"
         elif is_kernel_cve:
-            # linux-kernel 패키지
             collector_mode = "kernel"
         elif package_manager == "binary":
             collector_mode = "binary"
         else:
-            # 일반 패키지 (apk, dpkg로 설치된 zlib, musl 등 포함)
             collector_mode = "local"
 
         # 우선순위 계산
-        epss_score = cve_data.get("epss_score")
+        epss_score = cve_data.get("epss_score") or 0
         has_patch = patch_info.get("has_update", False) if patch_info else False
 
-        # CVE 연령 계산
-        cve_age_days = None
-        if cve_data.get("published_date"):
-            try:
-                pub_date = cve_data["published_date"]
-                if isinstance(pub_date, datetime):
-                    cve_age_days = (datetime.now() - pub_date).days
-            except Exception:
-                pass
-
-        priority_result = self.prioritizer.calculate_priority_score(
-            cvss_score=cvss_score,
-            epss_score=epss_score,
-            is_kev=is_kev,
-            usage_info=usage_info,
-            has_patch_available=has_patch,
-            cve_age_days=cve_age_days
-        )
+        # 우선순위 점수 계산 (간단한 로직)
+        priority_score = (cvss_score or 0) * 10  # CVSS를 기반으로
+        
+        if epss_score and epss_score > 0.5:
+            priority_score += 30  # EPSS 높으면 추가 점수
+        
+        if is_kev:
+            priority_score += 40  # KEV 등재는 큰 위험
+        
+        if usage_info and usage_info.get("is_running"):
+            priority_score += 20  # 실행 중인 패키지는 더 위험
+        
+        if has_patch:
+            priority_score -= 10  # 패치 가능하면 감소
+        
+        # 점수는 0-100 범위로
+        priority_score = min(100, max(0, priority_score))
+        
+        # 우선순위 레벨 결정
+        if cvss_score >= 9.0 or (is_kev and usage_info and usage_info.get("is_running")):
+            priority_level = "CRITICAL"
+        elif cvss_score >= 7.0 or (is_kev and priority_score >= 70):
+            priority_level = "HIGH"
+        elif cvss_score >= 4.0 or priority_score >= 50:
+            priority_level = "MEDIUM"
+        else:
+            priority_level = "LOW"
+        
+        priority_result = {
+            "priority_score": priority_score,
+            "priority_level": priority_level
+        }
 
         finding = Finding(
             host_id=host_id,
@@ -957,7 +1063,10 @@ class VulnerabilityMatcher:
             is_kernel_cve=is_kernel_cve,
             collector_mode=collector_mode
         )
-        session.add(finding)
+        try:
+            session.add(finding)
+        except Exception:
+            pass  # 중복 등 에러 무시
 
         # 통계 업데이트
         if is_kev:
@@ -1112,6 +1221,49 @@ class VulnerabilityMatcher:
                 # 버전 범위가 매칭 안 되고 트래커에서도 확인 안 됨
                 return False
         else:
+            # 버전 범위가 없으면 트래커 정보와 filter 옵션을 함께 사용
+            # filter_patched가 False면 패치 상태 무시
+            if self._scan_options.get("filter_patched", True):
+                if patch_status != "vulnerable_confirmed":
+                    return False
+
+        # ========================================
+        # 타 OS 관련 CVE 제외
+        # ========================================
+        if self._scan_options.get("filter_other_os", True):
+            description = cve_data.get("description", "").lower()
+
+            # Exclude common false positives (타 OS 전용)
+            false_positive_indicators = [
+                "microsoft", "windows", "apple", "macos", "android",
+                "chrome os", "safari", "internet explorer", "edge browser"
+            ]
+
+            for indicator in false_positive_indicators:
+                if indicator in description and pkg_name not in ["chrome", "firefox", "chromium"]:
+                    return False
+
+        cve_data["confidence_level"] = "confirmed" if patch_status == "vulnerable_confirmed" else "potential"
+        self._stats["actual_vulnerable"] += 1
+        return True
+        version_ranges = cve_data.get("version_ranges", [])
+        
+        # 버전 범위가 있으면 반드시 체크
+        if version_ranges:
+            # 매칭된 CPE 인덱스의 버전 범위 확인
+            if matched_cpe_index >= 0 and matched_cpe_index < len(version_ranges):
+                version_range = version_ranges[matched_cpe_index]
+                
+                # 설치된 버전 파싱 (ubuntu/debian suffixes 제거)
+                installed_version = self._parse_version(pkg_version.lower())
+                
+                if not self._is_version_vulnerable(installed_version, version_range):
+                    # 버전이 취약 범위에 없음 - 스킵
+                    return False
+            elif patch_status != "vulnerable_confirmed":
+                # 버전 범위가 매칭 안 되고 트래커에서도 확인 안 됨
+                return False
+        else:
             # 버전 범위가 없으면 트래커 정보로만 판단
             if patch_status != "vulnerable_confirmed":
                 return False
@@ -1193,7 +1345,7 @@ class VulnerabilityMatcher:
         start_excluding = version_range.get("versionStartExcluding")
         end_excluding = version_range.get("versionEndExcluding")
 
-        # If no version range specified, assume all versions vulnerable
+        # If no version range specified, check CPE criteria version
         if not any([start_including, end_including, start_excluding, end_excluding]):
             # Check CPE criteria version
             criteria = version_range.get("criteria", "")
@@ -1201,8 +1353,11 @@ class VulnerabilityMatcher:
             if len(parts) > 5:
                 cpe_version = parts[5]
                 if cpe_version and cpe_version != "*" and cpe_version != "-":
-                    # Specific version in CPE
+                    # Specific version in CPE: exact match only
                     return self._compare_versions(installed_version, cpe_version) == 0
+                else:
+                    # Wildcard version (* or -): assume vulnerable
+                    return True
             # No specific version info - assume vulnerable
             return True
 
@@ -1302,16 +1457,28 @@ class VulnerabilityMatcher:
         print("[FAST] Preloading process cache before CVE scan...")
         await self.usage_analyzer.preload_process_cache()
         
+        # === CPU 과부하 방지: 배치 크기 축소 + 동시성 제한 ===
         # 인덱스 로드 여부에 따라 배치 크기 결정
-        # 인덱스 사용 시 매우 빠르므로 큰 배치 가능
         if self.nvd_client.is_index_loaded():
-            batch_size = 100  # 인덱스 사용 시 100개씩
-            print(f"[스캔] 배치 모드 시작: {total_packages}개 패키지 처리")
+            batch_size = 50  # 배치 50개씩
+            max_concurrent = 15  # 동시 실행 최대 15개
+            print(f"[스캔] 배치 모드 시작: {total_packages}개 패키지 처리 (배치: {batch_size}, 동시성: {max_concurrent})")
         else:
-            batch_size = 40  # 기존 방식
-            print(f"[스캔] 배치 모드 시작: {total_packages}개 패키지 처리")
+            batch_size = 30
+            max_concurrent = 10
+            print(f"[스캔] 배치 모드 시작: {total_packages}개 패키지 처리 (배치: {batch_size}, 동시성: {max_concurrent})")
+        
+        # Semaphore로 동시 실행 태스크 수 제한 (CPU 폭주 방지)
+        semaphore = asyncio.Semaphore(max_concurrent)
 
         for batch_start in range(0, total_packages, batch_size):
+            # === 취소 체크 (배치 시작 전) ===
+            try:
+                await self._check_cancelled(session)
+            except asyncio.CancelledError:
+                print(f"[스캔] 취소됨 - {batch_start}/{total_packages} 패키지 처리 후 중단")
+                break
+
             batch_end = min(batch_start + batch_size, total_packages)
             batch = packages[batch_start:batch_end]
 
@@ -1321,8 +1488,8 @@ class VulnerabilityMatcher:
             batch_start_time = time.time()
             print(f"[스캔] 배치 {batch_num}/{total_batches} - {len(batch)}개 패키지 CVE 검색 중...")
 
-            # Process batch in parallel - collect data WITHOUT committing to DB
-            tasks = [self._process_package_data_only(pkg_data) for pkg_data in batch]
+            # Process batch in parallel - with concurrency limit (CPU 폭주 방지)
+            tasks = [self._process_package_with_semaphore(semaphore, pkg_data) for pkg_data in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             batch_elapsed = time.time() - batch_start_time
@@ -1332,13 +1499,24 @@ class VulnerabilityMatcher:
             for result in results:
                 if isinstance(result, Exception) or not result:
                     continue
-                if result.get('findings'):
+                findings_count = len(result.get('findings', []))
+                if findings_count > 0:
                     all_cve_data.extend(result['findings'])
             
-            # 한 번의 쿼리로 배치 전체 CVE 조회
+            # 한 번의 쿼리로 배치 전체 CVE 조회 (에러 복구 포함)
             cve_map = {}
             if all_cve_data:
-                cve_map = await self._get_or_create_cves_batch(session, all_cve_data)
+                try:
+                    cve_map = await self._get_or_create_cves_batch(session, all_cve_data)
+                except Exception as e:
+                    print(f"[에러] CVE 배치 생성 실패, 롤백 후 재시도: {e}")
+                    await session.rollback()
+                    try:
+                        cve_map = await self._get_or_create_cves_batch(session, all_cve_data)
+                    except Exception as e2:
+                        print(f"[에러] CVE 배치 재시도 실패, 배치 스킵: {e2}")
+                        await session.rollback()
+                        continue
 
             # Now save all batch results to DB in one transaction
             successful = 0
@@ -1353,13 +1531,33 @@ class VulnerabilityMatcher:
                         high_risk += result['high_risk_count']
                         successful += 1
                     except Exception as e:
-                        pass
+                        error_str = str(e)
+                        if "rolled back" in error_str or "database is locked" in error_str:
+                            print(f"[에러] DB 오류, 롤백 후 계속: {batch[i].get('name', 'unknown')}")
+                            try:
+                                await session.rollback()
+                            except Exception:
+                                pass
+                            break  # 이 배치의 나머지는 스킵
+                        else:
+                            print(f"[에러] 패키지 저장 실패 ({batch[i].get('name', 'unknown')}): {e}")
 
-            # Commit once per batch
-            await session.commit()
+            # Commit once per batch (with error recovery)
+            try:
+                await session.commit()
+            except Exception as e:
+                print(f"[에러] 배치 커밋 실패, 롤백: {e}")
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
             
             # 배치 완료 로그
             print(f"[스캔] 배치 {batch_num}/{total_batches} 완료 - {successful}개 패키지, 누적 CVE {total_cves}개 ({batch_elapsed:.1f}초)")
+            
+            # === CPU 휴식: 배치 간 짧은 대기 (시스템 과부하 방지) ===
+            if batch_end < total_packages:
+                await asyncio.sleep(0.2)  # 200ms 대기
 
             # Update progress after each batch
             if scan_id:
@@ -1396,6 +1594,9 @@ class VulnerabilityMatcher:
         # 패치 필터링 통계 출력
         self._print_patch_stats()
 
+        # === CVE 있는 패키지만 최근 실행 시간 수집 ===
+        await self._update_usage_for_cve_packages(session, scan_id)
+
         # EPSS/KEV 배치 업데이트 (현재 스캔의 모든 CVE)
         await self._batch_update_epss_kev(session, scan_id)
 
@@ -1405,6 +1606,107 @@ class VulnerabilityMatcher:
             "high_risk_count": high_risk,
             "filtered_by_patch": self._stats["filtered_by_patch"]
         }
+
+    async def _update_usage_for_cve_packages(self, session: AsyncSession, scan_id: Optional[int]):
+        """CVE가 발견된 패키지들의 최근 실행 시간을 수집하여 Finding에 반영"""
+        if not scan_id:
+            return
+        
+        # 1. 현재 스캔의 CVE 있는 패키지명 목록 조회
+        from ..models.schemas import Package
+        result = await session.execute(
+            select(Package.name).distinct()
+            .join(Finding, Finding.package_id == Package.id)
+            .where(Finding.scan_id == scan_id)
+        )
+        cve_package_names = [r[0] for r in result.fetchall()]
+        
+        # 시스템 가상 패키지 제외 (__OS__, __KERNEL__, linux-kernel)
+        cve_package_names = [
+            name for name in cve_package_names 
+            if not name.startswith('__') and name != 'linux-kernel'
+        ]
+        
+        if not cve_package_names:
+            print(f"[실행시간] CVE 패키지 없음, 스킵")
+            return
+        
+        print(f"[실행시간] CVE 발견된 {len(cve_package_names)}개 패키지의 최근 실행 시간 수집...")
+        print(f"[실행시간] 대상 패키지: {cve_package_names[:10]}{'...' if len(cve_package_names) > 10 else ''}")
+        
+        # 2. 해당 패키지들의 바이너리 atime 한번에 수집 (SSH 2회: dpkg -L + stat)
+        await self.usage_analyzer.load_binary_atimes_for_packages(cve_package_names)
+        
+        # 디버그: 캐시 상태 출력
+        cache = getattr(self.usage_analyzer, '_binary_atime_cache', {})
+        print(f"[실행시간] 캐시 크기: {len(cache)}개 항목")
+        if cache:
+            sample_keys = list(cache.keys())[:5]
+            for k in sample_keys:
+                v = cache[k]
+                print(f"  캐시[{k}] = {v.get('last_access', 'N/A')} ({v.get('path', 'N/A')})")
+        
+        # 3. 각 패키지별로 atime 조회 후 Finding 업데이트
+        updated_count = 0
+        not_found_pkgs = []
+        for pkg_name in cve_package_names:
+            binary_info = self.usage_analyzer._get_binary_atime_from_cache(pkg_name)
+            if not binary_info or not binary_info.get('last_access'):
+                not_found_pkgs.append(pkg_name)
+                continue
+            
+            last_used = binary_info['last_access']
+            last_used_ts = binary_info.get('timestamp')
+            
+            # 사용 레벨 결정
+            usage_level = None
+            if last_used_ts:
+                import time as _time
+                days_since = (_time.time() - last_used_ts) / 86400
+                if days_since < 1:
+                    usage_level = 'recent'
+                elif days_since < 30:
+                    usage_level = 'installed'
+                else:
+                    usage_level = 'unused'
+            
+            # 해당 패키지의 모든 Finding 업데이트
+            try:
+                from ..models.schemas import Package as PkgModel
+                findings_result = await session.execute(
+                    select(Finding)
+                    .join(PkgModel, Finding.package_id == PkgModel.id)
+                    .where(
+                        Finding.scan_id == scan_id,
+                        PkgModel.name == pkg_name
+                    )
+                )
+                findings = findings_result.scalars().all()
+                for f in findings:
+                    f.pkg_last_used = last_used
+                    if usage_level:
+                        f.pkg_usage_level = usage_level
+                    updated_count += 1
+            except Exception as e:
+                print(f"[실행시간] {pkg_name} 업데이트 실패: {e}")
+                continue
+        
+        if not_found_pkgs:
+            print(f"[실행시간] 바이너리 못 찾은 패키지({len(not_found_pkgs)}개): {not_found_pkgs[:10]}")
+        
+        # 커밋
+        if updated_count > 0:
+            try:
+                await session.flush()
+                print(f"[실행시간] {updated_count}개 Finding에 최근 실행 시간 반영 완료")
+            except Exception as e:
+                print(f"[실행시간] flush 실패: {e}")
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+        else:
+            print(f"[실행시간] 매칭된 바이너리 없음 (캐시 크기: {len(cache)})")
 
     async def _process_single_package(
         self,
@@ -1456,6 +1758,11 @@ class VulnerabilityMatcher:
             await session.rollback()
             return None
 
+    async def _process_package_with_semaphore(self, semaphore: asyncio.Semaphore, pkg_data: Dict) -> Optional[Dict]:
+        """Semaphore로 동시 실행 제한하며 패키지 처리 (CPU 과부하 방지)"""
+        async with semaphore:
+            return await self._process_package_data_only(pkg_data)
+    
     async def _process_package_data_only(self, pkg_data: Dict) -> Optional[Dict]:
         """Process a single package - collect CVE data only, NO database writes (dev_local_scanner 스타일)"""
         try:
@@ -1492,7 +1799,8 @@ class VulnerabilityMatcher:
                 if cve_id in seen_cves:
                     continue
                 seen_cves.add(cve_id)
-                if await self._is_relevant_cve(cve_data, pkg_data):
+                is_relevant = await self._is_relevant_cve(cve_data, pkg_data)
+                if is_relevant:
                     relevant_cves.append(cve_data)
                     cve_count += 1
 
@@ -1505,10 +1813,10 @@ class VulnerabilityMatcher:
             patch_info = None
             if relevant_cves:
                 try:
-                    # 타임아웃 3초 (속도 최우선)
+                    # 타임아웃 2초 (시스템 과부하 방지)
                     usage_info = await asyncio.wait_for(
                         self.usage_analyzer.analyze_package(pkg_name),
-                        timeout=3.0
+                        timeout=2.0
                     )
                     if usage_info and usage_info.get("usage_level") == "active":
                         self._stats["active_packages"] = self._stats.get("active_packages", 0) + 1
@@ -1637,10 +1945,53 @@ class VulnerabilityMatcher:
             new_cve_objects.append(cve)
             new_cves[cve_id] = cve
         
-        # 배치로 한 번에 추가
+        # 배치로 한 번에 추가 (에러 시 개별 처리)
         if new_cve_objects:
-            session.add_all(new_cve_objects)
-            await session.flush()
+            try:
+                session.add_all(new_cve_objects)
+                await session.flush()
+            except Exception as e:
+                # flush 실패 시 롤백 후 개별 처리
+                print(f"[CVE] 배치 flush 실패 ({len(new_cve_objects)}개), 개별 처리 시작: {e}")
+                await session.rollback()
+                
+                # 이미 존재하는 CVE 다시 조회
+                result = await session.execute(
+                    select(CVE).where(CVE.cve_id.in_(cve_ids))
+                )
+                existing_cves = {cve.cve_id: cve for cve in result.scalars().all()}
+                
+                # 아직 없는 것만 개별 추가
+                new_cves = {}
+                for cve_data in unique_cve_data:
+                    cve_id = cve_data["cve_id"]
+                    if cve_id in existing_cves or cve_id in new_cves:
+                        continue
+                    try:
+                        cve = CVE(
+                            cve_id=cve_id,
+                            description=cve_data.get("description"),
+                            published_date=cve_data.get("published_date"),
+                            last_modified=cve_data.get("last_modified"),
+                            cvss_v3_score=cve_data.get("cvss_v3_score"),
+                            cvss_v3_vector=cve_data.get("cvss_v3_vector"),
+                            cvss_v3_severity=cve_data.get("cvss_v3_severity"),
+                            cvss_v2_score=cve_data.get("cvss_v2_score"),
+                            cvss_v2_vector=cve_data.get("cvss_v2_vector"),
+                            cvss_v2_severity=cve_data.get("cvss_v2_severity"),
+                            cpe_list=cve_data.get("cpe_list"),
+                            references=cve_data.get("references"),
+                        )
+                        session.add(cve)
+                        await session.flush()
+                        new_cves[cve_id] = cve
+                    except Exception:
+                        await session.rollback()
+                        # 다시 조회 시도
+                        r = await session.execute(select(CVE).where(CVE.cve_id == cve_id))
+                        found = r.scalar_one_or_none()
+                        if found:
+                            existing_cves[cve_id] = found
         
         # 기존 + 새 CVE 합쳐서 반환
         all_cves = {**existing_cves, **new_cves}
@@ -1695,71 +2046,18 @@ class VulnerabilityMatcher:
 
         # Create findings (CVE는 이미 cve_map에 로드됨)
         for cve_data in result['findings']:
-            cve = cve_map.get(cve_data["cve_id"])
-            if not cve:
-                # 혹시 없으면 개별 조회 (fallback)
-                cve = await self._get_or_create_cve(session, cve_data)
-            
-            await self._create_finding(
-                session, host_id, package.id, cve.id, cve_data,
-                usage_info=usage_info,
-                patch_info=patch_info,
-                pkg_name=pkg_data.get("name"),
-                package_manager=pkg_data.get("package_manager")
-            )
-
-        await session.flush()
-
-    async def _process_single_package_with_session(
-        self,
-        host_id: int,
-        pkg_data: Dict
-    ) -> Optional[Dict[str, int]]:
-        """Process a single package with its own database session (for normal mode)"""
-        from ..models.database import async_session_maker
-
-        async with async_session_maker() as session:
             try:
-                package = await self._get_or_create_package(session, host_id, pkg_data)
-
-                cves = await self.nvd_client.search_cve_by_keyword(pkg_data["name"])
-
-                cve_count = 0
-                high_risk_count = 0
-                seen_cves = set()
-
-                for cve_data in cves:
-                    try:
-                        cve_id = cve_data.get("cve_id")
-                        if cve_id in seen_cves:
-                            continue
-                        seen_cves.add(cve_id)
-                        cve = await self._get_or_create_cve(session, cve_data)
-
-                        if await self._is_relevant_cve(cve_data, pkg_data):
-                            await self._create_finding(
-                                session, host_id, package.id, cve.id, cve_data,
-                                pkg_name=pkg_data.get("name"),
-                                package_manager=pkg_data.get("package_manager")
-                            )
-                            cve_count += 1
-
-                            cvss_score = cve_data.get("cvss_v3_score")
-                            if cvss_score is not None and cvss_score >= 7.0:
-                                high_risk_count += 1
-                    except Exception as cve_error:
-                        continue
-
-                await session.commit()
-
-                if cve_count > 0:
-                    print(f"  {pkg_data['name']}: {cve_count}개 CVE 발견")
-
-                return {
-                    "cve_count": cve_count,
-                    "high_risk_count": high_risk_count
-                }
+                cve = cve_map.get(cve_data["cve_id"])
+                if not cve:
+                    # 혹시 없으면 개별 조회 (fallback)
+                    cve = await self._get_or_create_cve(session, cve_data)
+                
+                await self._create_finding(
+                    session, host_id, package.id, cve.id, cve_data,
+                    usage_info=usage_info,
+                    patch_info=patch_info,
+                    pkg_name=pkg_data.get("name"),
+                    package_manager=pkg_data.get("package_manager")
+                )
             except Exception as e:
-                print(f"패키지 처리 실패 ({pkg_data.get('name', 'unknown')}): {e}")
-                await session.rollback()
-                return None
+                    pass

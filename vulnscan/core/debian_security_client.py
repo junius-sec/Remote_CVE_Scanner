@@ -39,7 +39,7 @@ class DebianSecurityClient:
 
     # Ubuntu 코드네임 목록 (Ubuntu인지 확인용)
     UBUNTU_CODENAMES = {
-        "oracular", "noble", "jammy", "focal", "bionic", "xenial",  # LTS + 24.10
+        "questing", "plucky", "oracular", "noble", "jammy", "focal", "bionic", "xenial",  # LTS + 최신
         "mantic", "lunar", "kinetic", "impish", "hirsute",  # 일반
     }
     
@@ -50,6 +50,8 @@ class DebianSecurityClient:
 
     # Ubuntu 코드네임 → Debian 코드네임 매핑 (fallback용)
     UBUNTU_TO_DEBIAN = {
+        "questing": "forky",    # 25.10 → Debian 14
+        "plucky": "trixie",     # 25.04 → Debian 13
         "oracular": "trixie",   # 24.10 → Debian 13
         "noble": "trixie",      # 24.04 → Debian 13
         "jammy": "bookworm",    # 22.04 → Debian 12
@@ -85,6 +87,51 @@ class DebianSecurityClient:
         self._is_ubuntu: Optional[bool] = None
         self._is_raspbian: Optional[bool] = None  # Raspbian 플래그 추가
         self._source_pkg_cache: Dict[str, Optional[str]] = {}
+
+    def set_target_os(self, distro_id: str, codename: str):
+        """
+        스캔 대상 호스트의 OS 정보를 설정
+        
+        /etc/os-release 대신 스캔 대상의 OS 정보로 필터링합니다.
+        이 메서드를 호출하면 _detect_os()는 /etc/os-release를 읽지 않습니다.
+        
+        Args:
+            distro_id: ubuntu, debian, raspbian 등
+            codename: jammy, bookworm 등
+        """
+        self._distro_id = distro_id.lower() if distro_id else "unknown"
+        self._os_codename = codename.lower() if codename else "unknown"
+        
+        # OS 타입 판단: codename 목록 또는 distro_id로 판단
+        self._is_ubuntu = (
+            self._os_codename in self.UBUNTU_CODENAMES or
+            self._distro_id == "ubuntu"
+        )
+        self._is_raspbian = (
+            self._distro_id in ["raspbian"] and 
+            self._os_codename in self.RASPBIAN_CODENAMES
+        )
+        
+        # Debian 코드네임 매핑
+        if self._is_ubuntu:
+            self._debian_codename = self.UBUNTU_TO_DEBIAN.get(self._os_codename, "trixie")  # 최신 Ubuntu는 trixie로 fallback
+        else:
+            self._debian_codename = self._os_codename
+        
+        print(f"[보안] 스캔 대상 OS: {self._distro_id}/{self._os_codename} (ubuntu={self._is_ubuntu}, debian_codename={self._debian_codename})")
+        
+        # Ubuntu면 캐시도 로드
+        if self._is_ubuntu and not self._ubuntu_cache_loaded:
+            import asyncio
+            # 동기적으로 캐시 파일 직접 로드
+            if self.ubuntu_cache_file.exists():
+                try:
+                    with open(self.ubuntu_cache_file, "r", encoding="utf-8") as f:
+                        self._ubuntu_cache = json.load(f)
+                    self._ubuntu_cache_loaded = True
+                    print(f"[보안] Ubuntu CVE 캐시 로드: {len(self._ubuntu_cache)}개 CVE")
+                except Exception:
+                    pass
 
     async def initialize(self) -> bool:
         """
@@ -136,16 +183,19 @@ class DebianSecurityClient:
         except:
             pass
         
-        # OS 타입 판단
-        self._is_ubuntu = self._os_codename in self.UBUNTU_CODENAMES
+        # OS 타입 판단: codename 목록 또는 distro_id로 판단
+        self._is_ubuntu = (
+            self._os_codename in self.UBUNTU_CODENAMES or
+            self._distro_id == "ubuntu"
+        )
         self._is_raspbian = (
-            self._distro_id in ["raspbian", "debian"] and 
+            self._distro_id in ["raspbian"] and 
             self._os_codename in self.RASPBIAN_CODENAMES
         )
         
         # Debian 코드네임 매핑
         if self._is_ubuntu:
-            self._debian_codename = self.UBUNTU_TO_DEBIAN.get(self._os_codename, self._os_codename)
+            self._debian_codename = self.UBUNTU_TO_DEBIAN.get(self._os_codename, "trixie")
         else:
             self._debian_codename = self._os_codename
 

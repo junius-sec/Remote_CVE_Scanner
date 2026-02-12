@@ -1,0 +1,61 @@
+# ============================================
+# VulnScan Server - Docker Compose
+# ============================================
+#
+# 사용법:
+#   시작:  docker compose up -d
+#   중지:  docker compose down
+#   로그:  docker compose logs -f
+#   재빌드: docker compose up -d --build
+#
+# ============================================
+
+services:
+  vulnscan:
+    build: .
+    container_name: vulnscan-server
+    restart: unless-stopped
+
+    ports:
+      - "8000:8000" # 웹 대시보드 포트
+
+    # ── 환경변수 ──
+    # .env 파일이 없으면 Dockerfile의 .env.example이 사용됨
+    # NVD_API_KEY를 설정하려면: cp .env.example .env 후 편집
+    env_file:
+      - .env
+
+    volumes:
+      # ── 데이터베이스 마운트 (호스트와 공유) ──
+      # vulnscan.db는 스캔 결과이므로 호스트와 공유 (컨테이너 재시작 시 유지)
+      - ./vulnscan.db:/app/data/vulnscan.db
+
+      # ── NVD/보안 캐시 (옵션 B: 이미지 내부 포함) ──
+      # 이미지에 포함되어 있으므로 볼륨 마운트 불필요
+      # 업데이트가 필요하면 아래 주석 해제하여 호스트 파일로 덮어쓰기 가능:
+      # - ./nvd_cache.db:/app/data/nvd_cache.db
+      # - ./kev_cache.json:/app/kev_cache.json
+      # - ./exploit_cache.json:/app/exploit_cache.json
+      # - ./debian_security_cache.json:/app/debian_security_cache.json
+      # - ./ubuntu_security_cache.json:/app/ubuntu_security_cache.json
+      # - ./vulnscan/cache:/app/vulnscan/cache
+
+      # ── SSH 키 (원격 스캔용) ──
+      # 호스트의 SSH 키를 읽기전용으로 마운트
+      - ~/.ssh:/root/.ssh:ro
+
+    environment:
+      - TZ=Asia/Seoul # 한국 시간대
+
+    # 헬스체크가 Dockerfile에도 있지만, compose에서 간격 조정 가능
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+# 볼륨 정의 (필요 시 주석 해제)
+# volumes:
+#   vulnscan-data:
+#     name: vulnscan-data

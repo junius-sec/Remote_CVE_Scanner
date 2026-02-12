@@ -103,6 +103,7 @@ class RemoteScanner:
         self._host = None
         self._ssh: Optional[SSHExecutor] = None
         self._progress_callback: Optional[Callable] = None
+        self._matcher = None  # VulnerabilityMatcher 참조 (취소용)
 
         self._result = ScanResult(success=False, host_id=host_id)
     
@@ -117,13 +118,21 @@ class RemoteScanner:
 
         from ..models.schemas import ScanJob
 
-        result = await self.session.execute(
-            select(ScanJob).where(ScanJob.id == self.job_id)
-        )
-        job = result.scalar_one_or_none()
+        try:
+            result = await self.session.execute(
+                select(ScanJob).where(ScanJob.id == self.job_id)
+            )
+            job = result.scalar_one_or_none()
 
-        if job and job.status == "cancelled":
-            raise Exception(f"Scan job {self.job_id} was cancelled by user")
+            if job and job.status == "cancelled":
+                # matcher도 취소
+                if hasattr(self, '_matcher') and self._matcher:
+                    self._matcher.cancel()
+                raise Exception(f"Scan job {self.job_id} was cancelled by user")
+        except Exception as e:
+            if "cancelled" in str(e):
+                raise
+            # DB 체크 실패는 무시
 
     async def _report_progress(self, phase: str, progress: int, message: str):
         """진행상황 보고 (논블로킹)"""
@@ -328,6 +337,19 @@ class RemoteScanner:
         # VulnerabilityMatcher 실행
         nvd_client = NVDClient()
         matcher = VulnerabilityMatcher(nvd_client)
+        self._matcher = matcher  # 취소용 참조 저장
+        
+        # 스캔 대상 호스트의 OS 정보로 필터링 설정 (/etc/os-release 대신)
+        if self._result.discovery:
+            target_codename = (
+                self._result.discovery.distro_codename or
+                self._result.discovery.distro_version or
+                "unknown"
+            )
+            matcher.debian_security.set_target_os(
+                self._host.distro_id or self._result.discovery.distro_id or "unknown",
+                target_codename
+            )
         
         # SSH executor를 usage_analyzer에 전달 (원격 스캔용)
         matcher.usage_analyzer.set_ssh_executor(self._ssh)
@@ -443,7 +465,7 @@ class RemoteScanner:
                         Package.version == pkg_version
                     )
                 )
-                package = result.scalar_one_or_none()
+                package = result.scalars().first()
                 
                 if not package:
                     package = Package(
@@ -469,7 +491,7 @@ class RemoteScanner:
                         Finding.scan_id == scan_id
                     )
                 )
-                existing = result.scalar_one_or_none()
+                existing = result.scalars().first()
                 
                 if existing:
                     continue
@@ -585,7 +607,7 @@ class RemoteScanner:
                         cve_result = await self.session.execute(
                             select(CVE).where(CVE.cve_id == cve_id_str)
                         )
-                        cve = cve_result.scalar_one_or_none()
+                        cve = cve_result.scalars().first()
                         
                         if cve:
                             cve.has_exploit = True
