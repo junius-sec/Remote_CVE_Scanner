@@ -1,29 +1,21 @@
 # GitHub 업로드 가이드
 
-## 1단계: 로컬 변경사항 커밋
+## 준비 완료!
 
-```bash
-# 현재 위치 확인
-cd /home/user/바탕화면/dev
+모든 파일(대용량 포함)이 Git LFS로 설정되어 커밋되었습니다.
 
-# 모든 파일 스테이징 (숨김 파일 포함)
-git add -A
+### 현재 상태
+- Git LFS 설치 및 설정 완료
+- nvd_cache.db (1.1GB) - Git LFS로 추적
+- debian_security_cache.json (67MB) - Git LFS로 추적
+- ubuntu_security_cache.json (37MB) - Git LFS로 추적
+- 총 3개 커밋 준비 완료
 
-# 커밋
-git commit -m "Initial commit: VulnScan v1.0.0
+---
 
-- 원격 SSH 스캔 기능
-- NVD CVE 매칭 (1.1GB 캐시 포함)
-- EPSS/KEV 통합
-- 패키지 실행 시간 추적 (dpkg -L 기반)
-- Docker 지원
-- 웹 대시보드
-- 사용 설명서 및 기술 문서"
-```
+## GitHub에 푸시하기
 
-## 2단계: GitHub 저장소 생성
-
-### GitHub 웹사이트에서:
+### 1단계: GitHub 저장소 생성
 
 1. https://github.com 접속 및 로그인
 2. 우측 상단 `+` 버튼 → `New repository` 클릭
@@ -34,24 +26,25 @@ git commit -m "Initial commit: VulnScan v1.0.0
    - **DO NOT** initialize with README (이미 있음)
 4. `Create repository` 클릭
 
-## 3단계: 원격 저장소 연결
+### 2단계: 원격 저장소 연결 및 푸시
 
-GitHub에서 생성 후 나오는 명령어 중 선택:
-
-### 방법 A: HTTPS (간단, 비밀번호 필요)
+#### 방법 A: HTTPS (간단)
 
 ```bash
 # 원격 저장소 추가 (username을 본인 GitHub ID로 변경)
 git remote add origin https://github.com/username/vulnscan.git
 
-# 브랜치 이름 확인/변경
+# 브랜치 이름 확인
 git branch -M main
 
-# 푸시
+# PATH에 Git LFS 추가 후 푸시
+export PATH="$HOME/.local/bin:$PATH"
 git push -u origin main
 ```
 
-### 방법 B: SSH (권장, 설정 필요)
+**중요**: Git LFS 파일을 푸시하려면 반드시 `export PATH="$HOME/.local/bin:$PATH"` 먼저 실행하세요!
+
+#### 방법 B: SSH (권장)
 
 #### SSH 키 생성 (최초 1회)
 
@@ -79,14 +72,15 @@ cat ~/.ssh/id_ed25519.pub
 # 원격 저장소 추가 (username을 본인 GitHub ID로 변경)
 git remote add origin git@github.com:username/vulnscan.git
 
-# 브랜치 이름 확인/변경
+# 브랜치 이름 확인
 git branch -M main
 
-# 푸시
+# PATH에 Git LFS 추가 후 푸시
+export PATH="$HOME/.local/bin:$PATH"
 git push -u origin main
 ```
 
-## 4단계: 푸시 확인
+### 3단계: 푸시 완료 확인
 
 ```bash
 # 원격 저장소 확인
@@ -101,10 +95,15 @@ git log --oneline
 
 GitHub 웹에서 저장소 확인: `https://github.com/username/vulnscan`
 
-## 5단계: 이후 변경사항 푸시
+**Git LFS 파일 확인**: 대용량 파일(nvd_cache.db 등)이 "Stored with Git LFS" 표시되어야 정상입니다.
+
+### 4단계: 이후 변경사항 푸시
 
 ```bash
 # 파일 수정 후...
+
+# PATH 설정 (매번 필요)
+export PATH="$HOME/.local/bin:$PATH"
 
 # 변경사항 확인
 git status
@@ -119,7 +118,9 @@ git commit -m "설명"
 git push
 ```
 
-## 주의사항
+---
+
+## Git LFS 주의사항
 
 ### .env 파일 보호
 
@@ -132,52 +133,35 @@ git status
 # .env 파일이 보이면 안 됨
 ```
 
-### 대용량 파일
+## Git LFS 주의사항
 
-`nvd_cache.db` (1.1GB)가 포함되어 있습니다.
+### PATH 설정 필수
 
-GitHub는 100MB 이상 파일에 경고가 나고, 2GB 이상은 거부합니다.
-
-#### 해결 방법 1: Git LFS 사용 (권장)
+매번 Git 명령 실행 시 다음 명령을 먼저 실행해야 합니다:
 
 ```bash
-# Git LFS 설치
-sudo apt install git-lfs  # Ubuntu/Debian
-# 또는
-brew install git-lfs  # macOS
-
-# LFS 초기화
-git lfs install
-
-# 큰 파일 추적
-git lfs track "*.db"
-git lfs track "*.json"
-
-# .gitattributes 커밋
-git add .gitattributes
-git commit -m "Add Git LFS tracking"
-
-# 기존 파일 다시 추가
-git add nvd_cache.db debian_security_cache.json
-git commit -m "Add cache files via Git LFS"
-
-# 푸시
-git push
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-#### 해결 방법 2: 제외하기
+영구 설정하려면:
 
 ```bash
-# .gitignore에 추가
-echo "nvd_cache.db" >> .gitignore
-echo "*_security_cache.json" >> .gitignore
-echo "exploit_cache.json" >> .gitignore
-echo "kev_cache.json" >> .gitignore
-
-# README에 다운로드 방법 안내 추가
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-## 트러블슈팅
+### GitHub LFS 용량 제한
+
+- **무료 계정**: 무제한 저장소, 1GB/월 대역폭
+- **Pro 계정**: 무제한 저장소, 50GB/월 대역폭
+
+현재 nvd_cache.db가 1.1GB이므로:
+- 저장소는 정상 (단일 파일 2GB 제한)
+- clone/pull 시 대역폭 소비 (처음 clone 시 1.1GB)
+
+---
+
+## .env 파일 보호
 
 ### "failed to push some refs"
 
