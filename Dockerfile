@@ -39,14 +39,14 @@ COPY .env.example .env
 # ── 6) 데이터 디렉토리 생성 ──
 RUN mkdir -p /app/data /app/vulnscan/cache
 
-# ── 7) NVD 캐시 및 보안 데이터 복사 (선택적) ──
-# 캐시 파일이 있으면 복사 (없으면 최초 실행 시 자동 생성)
-# 파일이 있으면 즉시 사용 가능, 없으면 약 30-60분 소요
-COPY nvd_cache.db* /app/data/ 2>/dev/null || true
-COPY kev_cache.json* /app/ 2>/dev/null || true
-COPY exploit_cache.json* /app/ 2>/dev/null || true
-COPY debian_security_cache.json* /app/ 2>/dev/null || true
-COPY ubuntu_security_cache.json* /app/ 2>/dev/null || true
+# ── 7) NVD 캐시 및 보안 데이터 복사 (필수) ──
+# 즉시 사용 가능하도록 모든 캐시 데이터를 이미지에 포함
+# Git LFS로 관리되는 대용량 파일 포함
+COPY nvd_cache.db /app/data/
+COPY kev_cache.json /app/
+COPY exploit_cache.json /app/
+COPY debian_security_cache.json /app/
+COPY ubuntu_security_cache.json /app/
 
 # ── 8) 환경변수 기본값 ──
 ENV HOST=0.0.0.0

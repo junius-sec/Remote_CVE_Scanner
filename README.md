@@ -14,27 +14,6 @@
 
 ## 빠른 시작
 
-### 사전 준비: NVD 캐시 다운로드
-
-NVD 데이터베이스는 용량이 커서 Git에 포함되지 않습니다. 아래 방법 중 하나로 다운로드하세요:
-
-#### 방법 1: 직접 다운로드 (권장)
-
-```bash
-# Google Drive 또는 릴리스 페이지에서 다운로드
-# nvd_cache.db (1.1GB)
-# debian_security_cache.json (67MB)
-# ubuntu_security_cache.json (37MB)
-
-# 다운로드한 파일을 프로젝트 루트에 배치
-mv ~/Downloads/nvd_cache.db .
-mv ~/Downloads/*_security_cache.json .
-```
-
-#### 방법 2: 자동 생성 (최초 실행 시, 시간 소요)
-
-서버를 실행하면 자동으로 NVD API에서 데이터를 다운로드합니다 (약 30-60분 소요).
-
 ### Docker로 실행 (권장)
 
 ```bash
