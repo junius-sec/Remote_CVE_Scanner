@@ -37,24 +37,29 @@ COPY .env.example .
 RUN mkdir -p /app/data /app/vulnscan/cache
 
 # ── 6) 캐시 데이터 복사 ──
-# nvd_cache.db (1.1GB)는 있으면 복사, 없으면 스킵
-# Git LFS 실패 시에도 빌드 가능하도록 방어
-COPY nvd_cache.db* /app/data/
-COPY kev_cache.json* /app/
-COPY exploit_cache.json* /app/
-COPY debian_security_cache.json* /app/
-COPY ubuntu_security_cache.json* /app/
+# Git LFS 파일이 없어도 빌드 가능하도록 조건부 복사
+# 호스트에 파일이 없으면 무시됨
+COPY --chown=root:root nvd_cache.db* /app/data/ 2>/dev/null || true
+COPY --chown=root:root kev_cache.json* /app/ 2>/dev/null || true
+COPY --chown=root:root exploit_cache.json* /app/ 2>/dev/null || true
+COPY --chown=root:root debian_security_cache.json* /app/ 2>/dev/null || true
+COPY --chown=root:root ubuntu_security_cache.json* /app/ 2>/dev/null || true
 
 # ── 6-1) LFS 포인터 파일 제거 (깨진 파일 방지) ──
 # Git LFS 미설치 시 포인터 텍스트(~130B)만 받아짐 → SQLite 에러 원인
 RUN if [ -f /app/data/nvd_cache.db ] && [ $(stat -c%s /app/data/nvd_cache.db) -lt 10000 ]; then \
-    echo "[경고] nvd_cache.db가 LFS 포인터입니다. 삭제합니다. (git lfs pull 필요)"; \
-    rm -f /app/data/nvd_cache.db; \
-    fi
+      echo "[경고] nvd_cache.db가 LFS 포인터입니다. 삭제합니다."; \
+      rm -f /app/data/nvd_cache.db; \
+    fi && \
+    for cache in kev_cache.json exploit_cache.json debian_security_cache.json ubuntu_security_cache.json; do \
+      if [ -f /app/$cache ] && [ $(stat -c%s /app/$cache) -lt 1000 ]; then \
+        echo "[경고] $cache가 LFS 포인터입니다. 삭제합니다."; \
+        rm -f /app/$cache; \
+      fi; \
+    done
 
 # ── 7) entrypoint 스크립트 ──
-COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
+COPY --chmod=755 entrypoint.sh /app/entrypoint.sh
 
 # ── 8) 환경변수 기본값 ──
 ENV HOST=0.0.0.0
@@ -69,4 +74,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')" || exit 1
 
 # ── 11) 서버 실행 ──
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["/app/entrypoint.sh"]
