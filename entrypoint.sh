@@ -1,34 +1,36 @@
 #!/bin/bash
-# ============================================
-# VulnScan Server - Entrypoint
-# ============================================
-# .env 준비 → 서버 실행
-# ============================================
-
 set -e
 
-# ── .env 파일 준비 ──
-# docker-compose에서 env_file로 주입하지만,
-# 단독 docker run 시에도 동작하도록 폴백
-if [ ! -f /app/.env ]; then
-    if [ -f /app/.env.example ]; then
-        echo "[초기화] .env.example → .env 복사"
-        cp /app/.env.example /app/.env
-    fi
+# ──────────────────────────────────────────────
+# SSH CVE Scanner – Docker Entrypoint
+# ──────────────────────────────────────────────
+
+DATA_DIR="/app/data"
+
+# ── 데이터 디렉터리 초기화 ──
+mkdir -p "$DATA_DIR"
+
+# ── vulnscan.db 심볼릭 링크 (영속 저장소 → 앱 디렉터리) ──
+# Docker 재시작해도 스캔 결과가 유지되도록 /app/data/ 에 저장
+if [ ! -f "$DATA_DIR/vulnscan.db" ]; then
+    echo "[entrypoint] 새 vulnscan.db 생성 예정 (/app/data/vulnscan.db)"
 fi
 
-# ── NVD 캐시 상태 표시 ──
-if [ -f /app/data/nvd_cache.db ]; then
-    SIZE=$(stat -c%s /app/data/nvd_cache.db 2>/dev/null || echo 0)
-    SIZE_MB=$((SIZE / 1024 / 1024))
-    echo "[시스템] NVD 캐시: ${SIZE_MB}MB 로드됨"
-else
-    echo "[시스템] NVD 캐시 없음 (첫 스캔 시 API로 다운로드됩니다)"
+# 기존 vulnscan.db가 앱 디렉터리에 있으면 데이터 디렉터리로 이동
+if [ -f /app/vulnscan.db ] && [ ! -L /app/vulnscan.db ]; then
+    echo "[entrypoint] vulnscan.db를 데이터 디렉터리로 이동..."
+    mv /app/vulnscan.db "$DATA_DIR/vulnscan.db"
 fi
 
-# ── 서버 실행 ──
-exec python -m uvicorn main:app \
-    --host "${HOST:-0.0.0.0}" \
-    --port "${PORT:-8000}" \
-    --log-level warning \
-    --no-access-log
+# 심볼릭 링크 생성
+if [ ! -L /app/vulnscan.db ]; then
+    ln -sf "$DATA_DIR/vulnscan.db" /app/vulnscan.db
+fi
+
+echo "================================================"
+echo "  SSH CVE Scanner"
+echo "  http://localhost:${PORT:-8000}"
+echo "================================================"
+
+# ── 서버 시작 ──
+exec python3 main.py

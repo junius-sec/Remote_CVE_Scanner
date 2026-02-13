@@ -1,6 +1,7 @@
 # ── Git / VCS ──
 .git
 .gitignore
+.gitattributes
 
 # ── Python 캐시 ──
 __pycache__
@@ -14,29 +15,25 @@ env/
 venv/
 .venv/
 
-# ── 메인 DB (스캔 결과 = 환경마다 다름) ──
-vulnscan.db
-
-# ── NVD/보안 캐시는 이미지에 포함됨 (옵션 B) ──
-# nvd_cache.db, kev_cache.json 등은 빌드에 포함되어 이미지 크기 증가
-# 대신 초기 실행 시 즉시 사용 가능
-
-# ── 환경 변수 (보안: API 키 포함) ──
+# ── 환경 변수 (보안: API 키 포함 → docker-compose에서 주입) ──
 .env
 .env.local
+.env.example
 env
 
-# ── 기타 불필요 파일 ──
-.cvss_migration_done
+# ── 스캔 결과 DB (런타임에 생성됨) ──
+vulnscan.db
+
+# ── 기타 ──
 server.log
 *.log
 .claude/
+README.md
+TECHNICAL.md
+USER_GUIDE.md
+USAGE.md
 
 # ── Docker 자체 파일 ──
 Dockerfile
 docker-compose.yml
 .dockerignore
-
-# ── 이전 스크립트 ──
-start.sh
-update_epss_kev.py

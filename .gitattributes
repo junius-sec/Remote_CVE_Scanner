@@ -1,2 +1,4 @@
 *.db filter=lfs diff=lfs merge=lfs -text
 *_security_cache.json filter=lfs diff=lfs merge=lfs -text
+exploit_cache.json filter=lfs diff=lfs merge=lfs -text
+kev_cache.json filter=lfs diff=lfs merge=lfs -text
