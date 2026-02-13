@@ -47,9 +47,18 @@ COPY ubuntu_security_cache.json* /app/
 
 # ── 6-1) LFS 포인터 파일 제거 (깨진 파일 방지) ──
 # Git LFS 미설치 시 포인터 텍스트(~130B)만 받아짐 → SQLite 에러 원인
-RUN if [ -f /app/data/nvd_cache.db ] && [ $(stat -c%s /app/data/nvd_cache.db) -lt 10000 ]; then \
-      echo "[경고] nvd_cache.db가 LFS 포인터입니다. 삭제합니다."; \
-      rm -f /app/data/nvd_cache.db; \
+RUN echo "=== 캐시 파일 확인 ===" && \
+    ls -lh /app/data/ && \
+    ls -lh /app/*.json 2>/dev/null || echo "JSON 캐시 없음" && \
+    if [ -f /app/data/nvd_cache.db ]; then \
+      SIZE=$(stat -c%s /app/data/nvd_cache.db); \
+      echo "nvd_cache.db 크기: $SIZE bytes"; \
+      if [ $SIZE -lt 10000 ]; then \
+        echo "[경고] nvd_cache.db가 LFS 포인터입니다. 삭제합니다."; \
+        rm -f /app/data/nvd_cache.db; \
+      fi; \
+    else \
+      echo "[정보] nvd_cache.db 없음 (git lfs pull 필요)"; \
     fi && \
     for cache in kev_cache.json exploit_cache.json debian_security_cache.json ubuntu_security_cache.json; do \
       if [ -f /app/$cache ] && [ $(stat -c%s /app/$cache) -lt 1000 ]; then \
@@ -59,7 +68,11 @@ RUN if [ -f /app/data/nvd_cache.db ] && [ $(stat -c%s /app/data/nvd_cache.db) -l
     done
 
 # ── 7) entrypoint 스크립트 ──
-COPY --chmod=755 entrypoint.sh /app/entrypoint.sh
+# Windows CRLF → LF 자동 변환
+COPY entrypoint.sh /tmp/entrypoint.sh
+RUN tr -d '\r' < /tmp/entrypoint.sh > /app/entrypoint.sh && \
+    chmod +x /app/entrypoint.sh && \
+    rm /tmp/entrypoint.sh
 
 # ── 8) 환경변수 기본값 ──
 ENV HOST=0.0.0.0
