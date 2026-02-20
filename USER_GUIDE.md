@@ -43,24 +43,22 @@
 
 ```bash
 # 저장소 클론 (또는 소스코드 다운로드)
-cd vulnscan
+git clone https://github.com/junius-sec/Remote_CVE_Scanner.git
+cd Remote_CVE_Scanner
 
-# Docker 이미지 빌드 (최초 1회, 2-3분 소요)
+# Docker 이미지 빌드 (최초 1회, 1-2분 소요)
 docker compose build
 ```
 
-**이미지 크기**: 약 1.7GB
+**이미지 크기**: 약 400MB
 - Python 런타임: ~400MB
-- NVD 데이터베이스: ~1.1GB
-- 보안 캐시 (KEV, ExploitDB 등): ~100MB
+- 캐시 데이터는 실행 시 자동 다운로드됩니다
 
 ### 2단계: 환경 설정
 
 ```bash
-# .env 파일 생성 (이미 있으면 스킵)
-cp .env.example .env
-
-# NVD API 키 입력 (선택, 권장)
+# .env 파일이 이미 포함되어 있습니다
+# NVD API 키를 변경하려면 .env 파일을 편집하세요
 nano .env
 ```
 
@@ -97,12 +95,12 @@ docker compose down
 python3 --version
 
 # 가상환경 생성
-python3 -m venv env
+python3 -m venv venv
 
 # 가상환경 활성화
-source env/bin/activate  # Linux/Mac
+source venv/bin/activate  # Linux/Mac
 # 또는
-env\Scripts\activate  # Windows
+venv\Scripts\activate  # Windows
 ```
 
 ### 2단계: 의존성 설치
@@ -120,10 +118,8 @@ sudo yum install openssh-clients sshpass  # RHEL/CentOS
 ### 3단계: 환경 설정
 
 ```bash
-# .env 파일 생성
-cp .env.example .env
-
-# NVD API 키 설정 (선택)
+# .env 파일이 이미 포함되어 있습니다
+# NVD API 키를 변경하려면 .env 파일을 편집하세요
 nano .env
 ```
 
@@ -412,20 +408,15 @@ sqlite3 vulnscan.db "PRAGMA wal_checkpoint(TRUNCATE);"
 
 ### Docker 빌드 실패
 
-**증상**: `COPY` 실패 또는 파일 없음
+**증상**: 빌드 오류
 
 **해결**:
-1. 필수 파일 확인:
-   ```bash
-   ls -lh nvd_cache.db kev_cache.json exploit_cache.json
-   ```
-
-2. 빌드 캐시 삭제 후 재시도:
+1. 빌드 캐시 삭제 후 재시도:
    ```bash
    docker compose build --no-cache
    ```
 
-3. 디스크 공간 확인:
+2. 디스크 공간 확인:
    ```bash
    df -h
    # 최소 3GB 필요
@@ -607,7 +598,7 @@ cp vulnscan.db vulnscan_backup_$(date +%Y%m%d).db
 
 # Docker 볼륨 백업
 docker compose down
-tar -czf vulnscan_backup.tar.gz vulnscan.db nvd_cache.db *.json
+tar -czf vulnscan_backup.tar.gz vulnscan.db
 docker compose up -d
 ```
 

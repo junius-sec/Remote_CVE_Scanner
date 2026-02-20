@@ -20,11 +20,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # lsof: 포트 정리(start.sh)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        sshpass \
-        openssh-client \
-        sqlite3 \
-        lsof \
-        curl \
+    sshpass \
+    openssh-client \
+    sqlite3 \
+    lsof \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # ── 작업 디렉터리 ──
@@ -40,17 +40,11 @@ COPY vulnscan/ ./vulnscan/
 COPY static/ ./static/
 COPY templates/ ./templates/
 COPY start.sh .
+COPY .env .
 
-# ── 캐시 데이터 복사 (이미지에 포함 → 초기 실행 속도 향상) ──
-# 이 파일들은 크기가 크지만, 이미지에 포함하면 최초 실행 시 다운로드 불필요
-COPY nvd_cache.db .
-COPY debian_security_cache.json .
-COPY ubuntu_security_cache.json .
-COPY exploit_cache.json .
-COPY kev_cache.json .
-
-# ── 마이그레이션 마커 ──
-COPY .cvss_migration_done .
+# ── 캐시/DB 파일은 포함하지 않음 ──
+# nvd_cache.db, *_security_cache.json, exploit_cache.json, kev_cache.json 등
+# → 실행 시 자동 생성되며, NVD/Debian/CISA 등에서 자동 다운로드됩니다.
 
 # ── 엔트리포인트 권한 설정 (CRLF → LF 변환 포함) ──
 COPY entrypoint.sh /entrypoint.sh

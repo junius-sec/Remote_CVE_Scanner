@@ -5,11 +5,11 @@
 ## 주요 기능
 
 - 원격 SSH 스캔 (에이전트 불필요)
-- NVD CVE 매칭 (1.1GB 로컬 캐시 포함)
+- NVD CVE 매칭 (자동 다운로드 캐시)
 - EPSS/KEV 악용 가능성 분석
 - 공개 PoC/Exploit 검색
 - 패키지 실행 시간 추적 (dpkg -L 기반)
-- Docker 지원 (1.7GB 올인원 이미지)
+- Docker 지원 (경량 이미지, 캐시 자동 생성)
 - 웹 대시보드
 
 ## 빠른 시작
@@ -18,14 +18,10 @@
 
 ```bash
 # 저장소 클론
-git clone <repository-url>
-cd vulnscan
+git clone https://github.com/junius-sec/Remote_CVE_Scanner.git
+cd Remote_CVE_Scanner
 
-# 환경 변수 설정 (선택)
-cp .env.example .env
-# .env 파일에서 NVD_API_KEY 설정 (권장)
-
-# Docker 실행
+# Docker 실행 (.env 포함되어 있어 바로 실행 가능)
 docker compose up -d
 
 # 브라우저에서 접속
@@ -36,14 +32,14 @@ docker compose up -d
 
 ```bash
 # Python 가상환경 생성
-python3 -m venv env
-source env/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 
 # 의존성 설치
 pip install -r requirements.txt
 sudo apt install openssh-client sshpass  # SSH 스캔용
 
-# 서버 실행
+# 서버 실행 (.env 포함되어 있어 바로 실행 가능)
 ./start.sh
 ```
 
@@ -51,7 +47,7 @@ sudo apt install openssh-client sshpass  # SSH 스캔용
 
 - Python 3.11 이상 또는 Docker
 - 메모리: 최소 2GB (권장 4GB)
-- 디스크: 최소 2GB (NVD 캐시 포함)
+- 디스크: 최소 3GB (NVD 캐시 자동 다운로드)
 
 ## 문서
 

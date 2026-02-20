@@ -23,7 +23,7 @@
 | OS | Windows / Linux / macOS | Linux (권장) / macOS |
 | Docker | ✅ 필수 (Docker Desktop 또는 Docker Engine) | ❌ 불필요 |
 | Python | ❌ 불필요 | ✅ Python 3.10 이상 |
-| Git LFS | ✅ 클론 시 필요 | ✅ 클론 시 필요 |
+| Git LFS | ❌ 불필요 | ❌ 불필요 |
 | NVD API Key | 선택 (없어도 동작) | 선택 (없어도 동작) |
 
 ---
@@ -35,26 +35,14 @@
 ### 1단계: 저장소 클론
 
 ```bash
-# Git LFS가 설치되어 있어야 합니다
-git lfs install
-git clone https://github.com/junius-sec/ssh_cve_scanner.git
-cd ssh_cve_scanner
+git clone https://github.com/junius-sec/Remote_CVE_Scanner.git
+cd Remote_CVE_Scanner
 ```
 
-### 2단계: 환경 변수 설정
+> 💡 `.env` 파일이 포함되어 있으므로 별도 설정 없이 바로 실행 가능합니다.
+> NVD API Key를 변경하려면 `.env` 파일을 편집하세요.
 
-```bash
-# .env.example을 복사하여 .env 파일 생성
-cp .env.example .env
-
-# .env 파일을 열어 NVD API Key 입력 (선택사항)
-# NVD_API_KEY=your_key_here
-```
-
-> 💡 **NVD API Key가 없어도 동작합니다.** 다만 NVD 데이터 업데이트 시 속도 제한이 있을 수 있습니다.
-> API Key는 [NVD 공식 사이트](https://nvd.nist.gov/developers/request-an-api-key)에서 무료로 발급받을 수 있습니다.
-
-### 3단계: 실행 (딸깍!)
+### 2단계: 실행 (딸깍!)
 
 ```bash
 docker compose up -d
@@ -94,9 +82,8 @@ docker compose up -d --build
 ### 1단계: 저장소 클론
 
 ```bash
-git lfs install
-git clone https://github.com/junius-sec/ssh_cve_scanner.git
-cd ssh_cve_scanner
+git clone https://github.com/junius-sec/Remote_CVE_Scanner.git
+cd Remote_CVE_Scanner
 ```
 
 ### 2단계: 시스템 패키지 설치
@@ -120,14 +107,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4단계: 환경 변수 설정
-
-```bash
-cp .env.example .env
-# .env 파일을 편집하여 NVD_API_KEY 입력 (선택사항)
-```
-
-### 5단계: 실행
+### 4단계: 실행
 
 ```bash
 # 방법 1: start.sh 사용
@@ -177,20 +157,15 @@ http://localhost:8000
 
 ## ❓ FAQ / 트러블슈팅
 
-### Q: `git clone` 시 대용량 파일이 다운로드되지 않아요
-
-```bash
-# Git LFS 설치 확인
-git lfs install
-
-# LFS 파일만 별도 다운로드
-git lfs pull
-```
-
 ### Q: Docker 빌드가 너무 오래 걸려요
 
-최초 빌드 시 NVD 캐시 DB(~1.1GB)를 이미지에 포함하므로 시간이 걸릴 수 있습니다.
+최초 빌드는 Python 의존성 설치에 시간이 걸릴 수 있습니다.
 이후 재빌드는 Docker 레이어 캐싱으로 빠르게 완료됩니다.
+
+### Q: 최초 실행 시 스캔이 느려요
+
+최초 실행 시 NVD 데이터(약 1.1GB)와 보안 캐시를 자동 다운로드합니다.
+인터넷 속도에 따라 수 분~수십 분이 소요될 수 있으며, 이후에는 로컬 캐시를 사용합니다.
 
 ### Q: Windows에서 `Permission denied` 오류가 발생해요
 
