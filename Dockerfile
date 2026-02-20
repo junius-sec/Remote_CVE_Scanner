@@ -40,11 +40,11 @@ COPY vulnscan/ ./vulnscan/
 COPY static/ ./static/
 COPY templates/ ./templates/
 COPY start.sh .
-COPY .env .
 
 # ── 캐시/DB 파일은 포함하지 않음 ──
 # nvd_cache.db, *_security_cache.json, exploit_cache.json, kev_cache.json 등
 # → 실행 시 자동 생성되며, NVD/Debian/CISA 등에서 자동 다운로드됩니다.
+# ── .env는 docker-compose.yml의 env_file로 주입 (이미지에 포함하지 않음) ──
 
 # ── 엔트리포인트 권한 설정 (CRLF → LF 변환 포함) ──
 COPY entrypoint.sh /entrypoint.sh
