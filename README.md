@@ -1,4 +1,4 @@
-# VulnScan
+# Remote CVE Scanner
 
 리눅스 시스템의 CVE 취약점을 원격으로 스캔하는 도구입니다. 에이전트 설치 없이 SSH로 연결하여 패키지 정보를 수집하고, NVD(National Vulnerability Database) 데이터를 기반으로 취약점을 탐지합니다.
 
