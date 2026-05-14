@@ -53,7 +53,3 @@ sudo apt install openssh-client sshpass  # SSH 스캔용
 
 - [사용 설명서](USER_GUIDE.md): 설치, 사용법, 문제 해결
 - [기술 문서](TECHNICAL.md): 아키텍처, 스캔 흐름, 확장 가이드
-
-## 라이선스
-
-MIT License
